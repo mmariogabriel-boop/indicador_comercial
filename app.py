@@ -64,13 +64,13 @@ st.markdown(
 # =========================================================
 # REGRAS FIXAS DO PROCESSO
 # =========================================================
-STATUS_BENEFICIARIO = "Ativado"
-STATUS_CONTRATO = "Aprovado"
-STATUS_VIDA = [
-    "Ag.Ativação",
-    "Aposentado / Demitido",
-    "Ativo",
-    "Em Análise",
+DESCRICOES_CANCELAMENTO_VALIDAS = [
+    "SEM JUSTA CAUSA",
+    "JUSTA CAUSA",
+    "A PEDIDO DO BENEFICIÁRIO (RN561)",
+    "BENEFÍCIO DEMITIDO/APOSENTADO (RN279)",
+    "DESLIGAMENTO DA EMPRESA (RN279)",
+    "INADIMPLENTE",
 ]
 
 DATA_CORTE = pd.Timestamp("2025-12-01")
@@ -85,8 +85,7 @@ COLUNAS_BASE_TOTAL = [
     "Data Início Beneficiário",
     "Data Inclusão Vida",
     "Descrição Status Atual Beneficiário",
-    "Descrição Status Atual Contrato",
-    "Descrição Status Vida",
+    "Descrição Cancelamento",
     "Id Acomodação",
     "Descrição Beneficiário",
     "Descrição Material",
@@ -291,22 +290,24 @@ def processar_bases(
     ).dt.days
 
     # -----------------------------------------------------
-    # 5. STATUS - MESMA REGRA DO NOTEBOOK
+    # 5. DESCRIÇÃO DE CANCELAMENTO - NOVA REGRA HOMOLOGADA
     # -----------------------------------------------------
+    # Mantém registros cuja descrição esteja na lista permitida
+    # OU esteja vazia/nula.
+    #
+    # Observação:
+    # df["Descrição Cancelamento"].isnull() não deve ficar dentro
+    # da lista passada ao .isin(); a condição de nulo é aplicada
+    # separadamente com OR.
+    mascara_cancelamento = (
+        df["Descrição Cancelamento"].isin(
+            DESCRICOES_CANCELAMENTO_VALIDAS
+        )
+        | df["Descrição Cancelamento"].isna()
+    )
+
     df = df[
-        (
-            df["Descrição Status Atual Beneficiário"]
-            == STATUS_BENEFICIARIO
-        )
-        & (
-            df["Descrição Status Atual Contrato"]
-            == STATUS_CONTRATO
-        )
-        & (
-            df["Descrição Status Vida"].isin(
-                STATUS_VIDA
-            )
-        )
+        mascara_cancelamento
     ].copy()
 
     # -----------------------------------------------------
@@ -986,6 +987,237 @@ def recalcular_rankings_comerciais(
 
 
 
+
+def criar_metas_2026():
+    """
+    Metas comerciais informadas para 2026.
+    Saúde possui a composição Empresarial + Coletivo por Adesão.
+    Odonto possui a meta mensal de vendas novas.
+    """
+    competencias = pd.date_range(
+        start="2026-01-01",
+        end="2026-12-01",
+        freq="MS",
+    )
+
+    meta_saude = pd.DataFrame(
+        {
+            "Competencia": competencias,
+            "Meta Saúde Empresarial": [
+                1928, 1960, 2154, 2335, 2134, 2234,
+                2200, 2477, 2475, 2384, 2646, 2630,
+            ],
+            "Meta Coletivo por Adesão": [
+                134, 154, 163, 167, 165, 171,
+                216, 202, 215, 210, 204, 226,
+            ],
+            "Meta Saúde Total": [
+                2062, 2114, 2317, 2502, 2299, 2405,
+                2416, 2679, 2690, 2594, 2850, 2856,
+            ],
+        }
+    )
+
+    meta_odonto = pd.DataFrame(
+        {
+            "Competencia": competencias,
+            "Meta Odonto": [
+                745, 651, 795, 706, 750, 877,
+                798, 833, 855, 876, 883, 929,
+            ],
+        }
+    )
+
+    return meta_saude, meta_odonto
+
+
+def montar_comparativo_saude(
+    vendido: pd.DataFrame,
+    metas: pd.DataFrame,
+    competencias_selecionadas: list[str],
+) -> pd.DataFrame:
+    competencias_datas = pd.to_datetime(
+        competencias_selecionadas,
+        format="%m/%Y",
+        errors="coerce",
+    )
+
+    base_meta = metas[
+        metas["Competencia"].isin(competencias_datas)
+    ].copy()
+
+    real = vendido[
+        ["Competencia", "Descrição Beneficiário"]
+    ].copy()
+
+    real = real.rename(
+        columns={
+            "Descrição Beneficiário": "Vendido",
+        }
+    )
+
+    comparativo = base_meta.merge(
+        real,
+        how="left",
+        on="Competencia",
+    )
+
+    comparativo["Vendido"] = (
+        comparativo["Vendido"]
+        .fillna(0)
+        .astype(int)
+    )
+
+    comparativo["Diferença"] = (
+        comparativo["Vendido"]
+        - comparativo["Meta Saúde Total"]
+    )
+
+    comparativo["Atingimento (%)"] = (
+        comparativo["Vendido"]
+        / comparativo["Meta Saúde Total"]
+        * 100
+    )
+
+    return comparativo.sort_values(
+        "Competencia"
+    ).reset_index(drop=True)
+
+
+def montar_comparativo_odonto(
+    vendido: pd.DataFrame,
+    metas: pd.DataFrame,
+    competencias_selecionadas: list[str],
+) -> pd.DataFrame:
+    competencias_datas = pd.to_datetime(
+        competencias_selecionadas,
+        format="%m/%Y",
+        errors="coerce",
+    )
+
+    base_meta = metas[
+        metas["Competencia"].isin(competencias_datas)
+    ].copy()
+
+    real = vendido[
+        ["Competencia", "Descrição Beneficiário"]
+    ].copy()
+
+    real = real.rename(
+        columns={
+            "Descrição Beneficiário": "Vendido",
+        }
+    )
+
+    comparativo = base_meta.merge(
+        real,
+        how="left",
+        on="Competencia",
+    )
+
+    comparativo["Vendido"] = (
+        comparativo["Vendido"]
+        .fillna(0)
+        .astype(int)
+    )
+
+    comparativo["Diferença"] = (
+        comparativo["Vendido"]
+        - comparativo["Meta Odonto"]
+    )
+
+    comparativo["Atingimento (%)"] = (
+        comparativo["Vendido"]
+        / comparativo["Meta Odonto"]
+        * 100
+    )
+
+    return comparativo.sort_values(
+        "Competencia"
+    ).reset_index(drop=True)
+
+
+def grafico_vendido_meta(
+    comparativo: pd.DataFrame,
+    coluna_meta: str,
+    titulo: str,
+) -> go.Figure:
+    dados = comparativo.copy()
+    dados["Competencia_Label"] = (
+        dados["Competencia"].dt.strftime("%m/%Y")
+    )
+
+    fig = go.Figure()
+
+    fig.add_bar(
+        x=dados["Competencia_Label"],
+        y=dados[coluna_meta],
+        name="Meta",
+        marker_color="#8B908D",
+        text=dados[coluna_meta],
+        textposition="outside",
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Meta: %{y:,.0f}<extra></extra>"
+        ),
+    )
+
+    fig.add_bar(
+        x=dados["Competencia_Label"],
+        y=dados["Vendido"],
+        name="Vendido",
+        marker_color="#86BC25",
+        text=dados["Vendido"],
+        textposition="outside",
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Vendido: %{y:,.0f}<extra></extra>"
+        ),
+    )
+
+    fig.update_layout(
+        title=titulo,
+        barmode="group",
+        height=470,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        legend=dict(
+            orientation="h",
+            y=1.12,
+            x=1,
+            xanchor="right",
+        ),
+        margin=dict(
+            l=35,
+            r=25,
+            t=80,
+            b=50,
+        ),
+        font=dict(
+            family="Arial",
+            color="#404640",
+        ),
+    )
+
+    fig.update_xaxes(
+        title="Competência",
+        showgrid=False,
+    )
+
+    fig.update_yaxes(
+        title="Quantidade",
+        gridcolor="#E8EDE4",
+        zeroline=False,
+    )
+
+    return fig
+
+
+def percentual_br(valor: float) -> str:
+    return f"{valor:.1f}%".replace(".", ",")
+
+
+
 def grafico_ranking_comercial(
     dados: pd.DataFrame,
     coluna_nome: str,
@@ -1168,10 +1400,11 @@ with st.sidebar:
 
     st.markdown("#### Regras fixas")
     st.caption("Movimentação: VIDA NOVA")
-    st.caption("Beneficiário: Ativado")
-    st.caption("Contrato: Aprovado")
     st.caption(
-        "Vida: Ag.Ativação, Aposentado / Demitido, Ativo ou Em Análise"
+        "Cancelamento aceito: SEM JUSTA CAUSA, JUSTA CAUSA, "
+        "A PEDIDO DO BENEFICIÁRIO (RN561), "
+        "BENEFÍCIO DEMITIDO/APOSENTADO (RN279), "
+        "DESLIGAMENTO DA EMPRESA (RN279), INADIMPLENTE ou vazio."
     )
     st.caption("Registros válidos: Diferença ≤ 0")
     st.caption("Competências disponíveis: 01/2026 em diante")
@@ -1244,7 +1477,7 @@ with st.sidebar:
         default=competencias_disponiveis,
         help=(
             "O filtro afeta Saúde, Odonto, executivos, produtos, "
-            "corretoras, vendedores, tipo de produto e os KPIs."
+            "corretoras, vendedores, tipo de produto, metas e os KPIs."
         ),
     )
 
@@ -1306,6 +1539,24 @@ df_comercial = df_comercial[
     df_tipo_produto,
 ) = recalcular_rankings_comerciais(
     df_comercial
+)
+
+
+# =========================================================
+# METAS X VENDIDO
+# =========================================================
+meta_saude_2026, meta_odonto_2026 = criar_metas_2026()
+
+comparativo_saude = montar_comparativo_saude(
+    df_saude_comp,
+    meta_saude_2026,
+    competencias_selecionadas,
+)
+
+comparativo_odonto = montar_comparativo_odonto(
+    df_odonto_comp,
+    meta_odonto_2026,
+    competencias_selecionadas,
 )
 
 
@@ -1373,6 +1624,7 @@ k4.metric(
 # =========================================================
 (
     aba_geral,
+    aba_metas,
     aba_saude,
     aba_odonto,
     aba_rankings,
@@ -1380,6 +1632,7 @@ k4.metric(
 ) = st.tabs(
     [
         "Visão Geral",
+        "Metas",
         "Saúde",
         "Odonto",
         "Rankings Comerciais",
@@ -1427,6 +1680,169 @@ with aba_geral:
                     "displaylogo": False,
                 },
             )
+
+
+# ---------------------------------------------------------
+# METAS
+# ---------------------------------------------------------
+with aba_metas:
+    st.subheader("Vendido x Meta")
+
+    st.caption(
+        "O realizado utiliza exatamente os mesmos agrupamentos homologados "
+        "do dashboard. A meta é comparada somente às competências selecionadas."
+    )
+
+    # -----------------------------------------------------
+    # KPIs Saúde
+    # -----------------------------------------------------
+    vendido_saude_meta = int(
+        comparativo_saude["Vendido"].sum()
+    ) if not comparativo_saude.empty else 0
+
+    meta_saude_total = int(
+        comparativo_saude["Meta Saúde Total"].sum()
+    ) if not comparativo_saude.empty else 0
+
+    ating_saude = (
+        vendido_saude_meta / meta_saude_total * 100
+        if meta_saude_total
+        else 0
+    )
+
+    diferenca_saude = (
+        vendido_saude_meta - meta_saude_total
+    )
+
+    # -----------------------------------------------------
+    # KPIs Odonto
+    # -----------------------------------------------------
+    vendido_odonto_meta = int(
+        comparativo_odonto["Vendido"].sum()
+    ) if not comparativo_odonto.empty else 0
+
+    meta_odonto_total = int(
+        comparativo_odonto["Meta Odonto"].sum()
+    ) if not comparativo_odonto.empty else 0
+
+    ating_odonto = (
+        vendido_odonto_meta / meta_odonto_total * 100
+        if meta_odonto_total
+        else 0
+    )
+
+    diferenca_odonto = (
+        vendido_odonto_meta - meta_odonto_total
+    )
+
+    st.markdown("#### Saúde")
+
+    s1, s2, s3, s4 = st.columns(4)
+
+    s1.metric(
+        "Vendido",
+        f"{vendido_saude_meta:,}".replace(",", "."),
+    )
+
+    s2.metric(
+        "Meta",
+        f"{meta_saude_total:,}".replace(",", "."),
+    )
+
+    s3.metric(
+        "Atingimento",
+        percentual_br(ating_saude),
+    )
+
+    s4.metric(
+        "Diferença",
+        f"{diferenca_saude:+,}".replace(",", "."),
+    )
+
+    if not comparativo_saude.empty:
+        st.plotly_chart(
+            grafico_vendido_meta(
+                comparativo_saude,
+                "Meta Saúde Total",
+                "Saúde — Vendido x Meta Total",
+            ),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+            },
+        )
+
+        tabela_saude_meta = comparativo_saude.copy()
+        tabela_saude_meta["Competencia"] = (
+            tabela_saude_meta["Competencia"]
+            .dt.strftime("%m/%Y")
+        )
+
+        st.dataframe(
+            tabela_saude_meta,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Atingimento (%)": st.column_config.NumberColumn(
+                    format="%.1f%%"
+                ),
+            },
+        )
+
+    st.divider()
+    st.markdown("#### Odonto")
+
+    o1, o2, o3, o4 = st.columns(4)
+
+    o1.metric(
+        "Vendido",
+        f"{vendido_odonto_meta:,}".replace(",", "."),
+    )
+
+    o2.metric(
+        "Meta",
+        f"{meta_odonto_total:,}".replace(",", "."),
+    )
+
+    o3.metric(
+        "Atingimento",
+        percentual_br(ating_odonto),
+    )
+
+    o4.metric(
+        "Diferença",
+        f"{diferenca_odonto:+,}".replace(",", "."),
+    )
+
+    if not comparativo_odonto.empty:
+        st.plotly_chart(
+            grafico_vendido_meta(
+                comparativo_odonto,
+                "Meta Odonto",
+                "Odonto — Vendido x Meta",
+            ),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+            },
+        )
+
+        tabela_odonto_meta = comparativo_odonto.copy()
+        tabela_odonto_meta["Competencia"] = (
+            tabela_odonto_meta["Competencia"]
+            .dt.strftime("%m/%Y")
+        )
+
+        st.dataframe(
+            tabela_odonto_meta,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Atingimento (%)": st.column_config.NumberColumn(
+                    format="%.1f%%"
+                ),
+            },
+        )
 
 
 # ---------------------------------------------------------
@@ -1535,7 +1951,7 @@ with aba_rankings:
 
     st.caption(
         "Todos os rankings abaixo utilizam a mesma base válida do processo: "
-        "VIDA NOVA, status homologados, Diferença ≤ 0 e as competências selecionadas no filtro lateral."
+        "VIDA NOVA, regra de cancelamento homologada, Diferença ≤ 0 e as competências selecionadas no filtro lateral."
     )
 
     c1, c2 = st.columns(2)
