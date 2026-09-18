@@ -1,0 +1,52 @@
+DASHBOARD COMERCIAL - MEDIATORIE
+
+Esta versão reproduz diretamente o código-base homologado.
+
+UPLOADS
+1. Base Total
+2. Carteira de Executivos
+
+MERGE
+left_on  = Id Corretora
+right_on = ID Parceiro
+how      = left
+
+REGRAS
+- Tipo Movimentação == VIDA NOVA
+- Data Inclusão Vida e Data Início Beneficiário convertidas para datetime
+- Diferenca = Data Inclusão Vida - Data Início Beneficiário
+- Descrição Status Atual Beneficiário == Ativado
+- Descrição Status Atual Contrato == Aprovado
+- Descrição Status Vida em:
+  Ag.Ativação
+  Aposentado / Demitido
+  Ativo
+  Em Análise
+- Base válida: Diferenca <= 0
+
+SAÚDE
+Id Acomodação NÃO está em ['ODO', 'SEM']
+
+ODONTO
+Id Acomodação está em ['ODO']
+
+GRÁFICOS / AGRUPAMENTOS
+Saúde por executivo:
+groupby(['Competencia', 'NOME']).agg({'Id Corretora': 'count'})
+
+Odonto por executivo:
+groupby(['Competencia', 'NOME']).agg({'Id Corretora': 'count'})
+
+Saúde por competência:
+groupby('Competencia').agg({'Descrição Beneficiário': 'count'})
+
+Odonto por competência:
+groupby('Competencia').agg({'Descrição Beneficiário': 'count'})
+
+PERÍODO
+Competencia > 2025-12-01
+Portanto, 01/2026 em diante.
+
+EXECUÇÃO
+python -m pip install -r requirements.txt
+streamlit run app.py
