@@ -91,6 +91,7 @@ COLUNAS_BASE_TOTAL = [
     "Descrição Material",
     "Descrição Corretora",
     "Descrição Vendedor",
+    "Descrição Entidade",
 ]
 
 COLUNAS_CARTEIRA = [
@@ -182,6 +183,12 @@ def padronizar_colunas_comerciais(
             "Descrição Vendendor",
             "Descricao Vendedor",
             "Descricao Vendendor",
+        ],
+        "Descrição Entidade": [
+            "Descrição Entidade",
+            "Descricao Entidade",
+            "Entidade",
+            "Nome Entidade",
         ],
     }
 
@@ -841,6 +848,248 @@ def grafico_por_executivo(
 
 
 
+
+def recalcular_visoes_filtradas(
+    df_filtrado: pd.DataFrame,
+):
+    """
+    Recalcula Saúde, Odonto, executivos e rankings depois dos filtros globais.
+
+    A base recebida já passou por todas as regras homologadas:
+    - merge da carteira;
+    - VIDA NOVA;
+    - regra de Descrição Cancelamento;
+    - Diferenca <= 0;
+    - competência a partir de 01/2026.
+    """
+
+    # -----------------------------------------------------
+    # SAÚDE / ODONTO
+    # -----------------------------------------------------
+    df_saude = df_filtrado[
+        ~df_filtrado["Id Acomodação"].isin(
+            ["ODO", "SEM"]
+        )
+    ].copy()
+
+    df_odonto = df_filtrado[
+        df_filtrado["Id Acomodação"].isin(
+            ["ODO"]
+        )
+    ].copy()
+
+    # -----------------------------------------------------
+    # SAÚDE POR EXECUTIVO
+    # -----------------------------------------------------
+    df_saude_exec = (
+        df_saude
+        .groupby(
+            ["Competencia", "NOME"],
+            dropna=False,
+        )
+        .agg(
+            {
+                "Id Corretora": "count",
+            }
+        )
+        .reset_index()
+    )
+
+    df_saude_exec["Competencia"] = pd.to_datetime(
+        df_saude_exec["Competencia"],
+        format="%m/%Y",
+        errors="coerce",
+    )
+
+    df_saude_exec = (
+        df_saude_exec
+        .sort_values(
+            ["Competencia", "NOME"]
+        )
+        .reset_index(drop=True)
+    )
+
+    # -----------------------------------------------------
+    # ODONTO POR EXECUTIVO
+    # -----------------------------------------------------
+    df_odonto_exec = (
+        df_odonto
+        .groupby(
+            ["Competencia", "NOME"],
+            dropna=False,
+        )
+        .agg(
+            {
+                "Id Corretora": "count",
+            }
+        )
+        .reset_index()
+    )
+
+    df_odonto_exec["Competencia"] = pd.to_datetime(
+        df_odonto_exec["Competencia"],
+        format="%m/%Y",
+        errors="coerce",
+    )
+
+    df_odonto_exec = (
+        df_odonto_exec
+        .sort_values(
+            ["Competencia", "NOME"]
+        )
+        .reset_index(drop=True)
+    )
+
+    # -----------------------------------------------------
+    # SAÚDE POR COMPETÊNCIA
+    # -----------------------------------------------------
+    df_saude_comp = (
+        df_saude
+        .groupby(
+            "Competencia",
+            dropna=False,
+        )
+        .agg(
+            {
+                "Descrição Beneficiário": "count",
+            }
+        )
+        .reset_index()
+    )
+
+    df_saude_comp["Competencia"] = pd.to_datetime(
+        df_saude_comp["Competencia"],
+        format="%m/%Y",
+        errors="coerce",
+    )
+
+    df_saude_comp = (
+        df_saude_comp
+        .sort_values("Competencia")
+        .reset_index(drop=True)
+    )
+
+    # -----------------------------------------------------
+    # ODONTO POR COMPETÊNCIA
+    # -----------------------------------------------------
+    df_odonto_comp = (
+        df_odonto
+        .groupby(
+            "Competencia",
+            dropna=False,
+        )
+        .agg(
+            {
+                "Descrição Beneficiário": "count",
+            }
+        )
+        .reset_index()
+    )
+
+    df_odonto_comp["Competencia"] = pd.to_datetime(
+        df_odonto_comp["Competencia"],
+        format="%m/%Y",
+        errors="coerce",
+    )
+
+    df_odonto_comp = (
+        df_odonto_comp
+        .sort_values("Competencia")
+        .reset_index(drop=True)
+    )
+
+    # -----------------------------------------------------
+    # RANKING GENÉRICO
+    # -----------------------------------------------------
+    def ranking_por(coluna: str) -> pd.DataFrame:
+        base = df_filtrado.copy()
+
+        base[coluna] = (
+            base[coluna]
+            .astype("string")
+            .fillna("Não informado")
+            .str.strip()
+            .replace("", "Não informado")
+        )
+
+        return (
+            base
+            .groupby(
+                coluna,
+                dropna=False,
+            )
+            .agg(
+                {
+                    "Descrição Beneficiário": "count",
+                }
+            )
+            .reset_index()
+            .rename(
+                columns={
+                    "Descrição Beneficiário": "Quantidade",
+                }
+            )
+            .sort_values(
+                "Quantidade",
+                ascending=False,
+            )
+            .reset_index(drop=True)
+        )
+
+    df_produtos_ranking = ranking_por(
+        "Descrição Material"
+    )
+
+    df_corretoras_ranking = ranking_por(
+        "Descrição Corretora"
+    )
+
+    df_vendedores_ranking = ranking_por(
+        "Descrição Vendedor"
+    )
+
+    df_entidades_ranking = ranking_por(
+        "Descrição Entidade"
+    )
+
+    df_tipo_produto = (
+        df_filtrado
+        .groupby(
+            "Tipo Produto",
+            dropna=False,
+        )
+        .agg(
+            {
+                "Descrição Beneficiário": "count",
+            }
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "Descrição Beneficiário": "Quantidade",
+            }
+        )
+        .sort_values(
+            "Quantidade",
+            ascending=False,
+        )
+        .reset_index(drop=True)
+    )
+
+    return (
+        df_saude_exec,
+        df_odonto_exec,
+        df_saude_comp,
+        df_odonto_comp,
+        df_produtos_ranking,
+        df_corretoras_ranking,
+        df_vendedores_ranking,
+        df_entidades_ranking,
+        df_tipo_produto,
+    )
+
+
+
 def recalcular_rankings_comerciais(
     df_comercial_filtrado: pd.DataFrame,
 ):
@@ -1454,7 +1703,7 @@ except Exception as erro:
 
 
 # =========================================================
-# FILTRO DE COMPETÊNCIA
+# FILTROS GLOBAIS
 # =========================================================
 competencias_disponiveis = (
     df_comercial[
@@ -1469,16 +1718,13 @@ competencias_disponiveis = (
 
 with st.sidebar:
     st.divider()
-    st.markdown("### Filtro de competência")
+    st.markdown("### Filtros")
 
     competencias_selecionadas = st.multiselect(
         "Competência",
         options=competencias_disponiveis,
         default=competencias_disponiveis,
-        help=(
-            "O filtro afeta Saúde, Odonto, executivos, produtos, "
-            "corretoras, vendedores, tipo de produto, metas e os KPIs."
-        ),
+        help="Selecione um ou mais meses.",
     )
 
 if not competencias_selecionadas:
@@ -1487,57 +1733,149 @@ if not competencias_selecionadas:
     )
     st.stop()
 
-competencias_datas = pd.to_datetime(
-    competencias_selecionadas,
-    format="%m/%Y",
-    errors="coerce",
-)
-
-# ---------------------------------------------------------
-# Filtra os agrupamentos homologados de Saúde/Odonto
-# ---------------------------------------------------------
-df_saude_exec = df_saude_exec[
-    df_saude_exec["Competencia"].isin(
-        competencias_datas
-    )
-].copy()
-
-df_odonto_exec = df_odonto_exec[
-    df_odonto_exec["Competencia"].isin(
-        competencias_datas
-    )
-].copy()
-
-df_saude_comp = df_saude_comp[
-    df_saude_comp["Competencia"].isin(
-        competencias_datas
-    )
-].copy()
-
-df_odonto_comp = df_odonto_comp[
-    df_odonto_comp["Competencia"].isin(
-        competencias_datas
-    )
-].copy()
-
-# ---------------------------------------------------------
-# Filtra a base comercial usada pelos novos rankings
-# ---------------------------------------------------------
-df_comercial = df_comercial[
+# Primeiro aplica competência para montar as opções comerciais.
+df_filtros = df_comercial[
     df_comercial["Competencia"].isin(
         competencias_selecionadas
     )
 ].copy()
 
-# ---------------------------------------------------------
-# Recalcula os rankings após o filtro
-# ---------------------------------------------------------
+with st.sidebar:
+    materiais_disponiveis = sorted(
+        df_filtros["Descrição Material"]
+        .astype("string")
+        .fillna("Não informado")
+        .str.strip()
+        .replace("", "Não informado")
+        .unique()
+        .tolist()
+    )
+
+    materiais_selecionados = st.multiselect(
+        "Material",
+        options=materiais_disponiveis,
+        default=materiais_disponiveis,
+    )
+
+    corretoras_disponiveis = sorted(
+        df_filtros["Descrição Corretora"]
+        .astype("string")
+        .fillna("Não informado")
+        .str.strip()
+        .replace("", "Não informado")
+        .unique()
+        .tolist()
+    )
+
+    corretoras_selecionadas = st.multiselect(
+        "Corretora",
+        options=corretoras_disponiveis,
+        default=corretoras_disponiveis,
+    )
+
+    vendedores_disponiveis = sorted(
+        df_filtros["Descrição Vendedor"]
+        .astype("string")
+        .fillna("Não informado")
+        .str.strip()
+        .replace("", "Não informado")
+        .unique()
+        .tolist()
+    )
+
+    vendedores_selecionados = st.multiselect(
+        "Vendedor",
+        options=vendedores_disponiveis,
+        default=vendedores_disponiveis,
+    )
+    Entidades_dispniveis = sorted(
+    df_filtros["Descrição Entidade"]
+    .astype("string")
+    .fillna("Não informado")
+    .str.strip()
+    .replace("", "Não informado")
+    .unique()
+    .tolist()
+)
+
+    Entidades_selecionadas = st.multiselect(
+        "Entidade",
+        options=Entidades_dispniveis,
+        default=Entidades_dispniveis,
+    )
+    Acomodação = sorted(
+    df_filtros["Id Acomodação"]
+    .astype("string")
+    .fillna("Não informado")
+    .str.strip()
+    .replace("", "Não informado")
+    .unique()
+    .tolist()
+)
+
+    Acomodação_selecionada = st.multiselect(
+        "Id Acomodação",
+        options=Acomodação,
+        default=Acomodação,
+    )
+
+    st.caption(
+        "Os filtros afetam KPIs, Saúde, Odonto, executivos, "
+        "rankings comerciais e o realizado do comparativo de metas."
+    )
+
+# Padroniza os campos antes de aplicar os filtros.
+for coluna in [
+    "Descrição Material",
+    "Descrição Corretora",
+    "Descrição Vendedor",
+    "Descrição Entidade",
+    "Id Acomodação"
+]:
+    df_filtros[coluna] = (
+        df_filtros[coluna]
+        .astype("string")
+        .fillna("Não informado")
+        .str.strip()
+        .replace("", "Não informado")
+    )
+
+df_comercial = df_filtros[
+    df_filtros["Descrição Material"].isin(
+        materiais_selecionados
+    )
+    & df_filtros["Descrição Corretora"].isin(
+        corretoras_selecionadas
+    )
+    & df_filtros["Descrição Vendedor"].isin(
+        vendedores_selecionados
+    )
+    & df_filtros["Descrição Entidade"].isin(
+        Entidades_selecionadas
+    )
+        & df_filtros["Id Acomodação"].isin(
+        Acomodação_selecionada
+    )
+].copy()
+
+if df_comercial.empty:
+    st.warning(
+        "Nenhum registro corresponde aos filtros selecionados."
+    )
+    st.stop()
+
+# Recalcula todas as visões com a base filtrada.
 (
+    df_saude_exec,
+    df_odonto_exec,
+    df_saude_comp,
+    df_odonto_comp,
     df_produtos_ranking,
     df_corretoras_ranking,
     df_vendedores_ranking,
+    df_entidades_ranking,
     df_tipo_produto,
-) = recalcular_rankings_comerciais(
+) = recalcular_visoes_filtradas(
     df_comercial
 )
 
@@ -1578,6 +1916,9 @@ if sem_executivo:
 st.caption(
     "**Competência selecionada:** "
     + ", ".join(competencias_selecionadas)
+    + f"  |  **Materiais:** {len(materiais_selecionados)}"
+    + f"  |  **Corretoras:** {len(corretoras_selecionadas)}"
+    + f"  |  **Vendedores:** {len(vendedores_selecionados)}"
 )
 
 # =========================================================
@@ -1951,7 +2292,8 @@ with aba_rankings:
 
     st.caption(
         "Todos os rankings abaixo utilizam a mesma base válida do processo: "
-        "VIDA NOVA, regra de cancelamento homologada, Diferença ≤ 0 e as competências selecionadas no filtro lateral."
+        "VIDA NOVA, regra de cancelamento homologada, Diferença ≤ 0 "
+        "e os filtros selecionados no menu lateral."
     )
 
     c1, c2 = st.columns(2)
@@ -2002,8 +2344,11 @@ with aba_rankings:
 
     with c4:
         st.plotly_chart(
-            grafico_tipo_produto(
-                df_tipo_produto,
+            grafico_ranking_comercial(
+                df_entidades_ranking,
+                "Descrição Entidade",
+                "Ranking por entidade",
+                top_n=10,
             ),
             use_container_width=True,
             config={
@@ -2011,11 +2356,28 @@ with aba_rankings:
             },
         )
 
-    tabela_produto, tabela_corretora, tabela_vendedor, tabela_tipo = st.tabs(
+    st.plotly_chart(
+        grafico_tipo_produto(
+            df_tipo_produto,
+        ),
+        use_container_width=True,
+        config={
+            "displaylogo": False,
+        },
+    )
+
+    (
+        tabela_produto,
+        tabela_corretora,
+        tabela_vendedor,
+        tabela_entidade,
+        tabela_tipo,
+    ) = st.tabs(
         [
             "Produtos",
             "Corretoras",
             "Vendedores",
+            "Entidades",
             "Tipo de produto",
         ]
     )
@@ -2037,6 +2399,13 @@ with aba_rankings:
     with tabela_vendedor:
         st.dataframe(
             df_vendedores_ranking,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tabela_entidade:
+        st.dataframe(
+            df_entidades_ranking,
             use_container_width=True,
             hide_index=True,
         )
