@@ -1,2481 +1,1006 @@
+"""Painel Streamlit do Indicador Operacional Mediatorie."""
+
 from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-import unicodedata
 
+import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from relatorio_pdf import gerar_relatorio_pdf
 
-# =========================================================
-# CONFIGURAÇÃO DA PÁGINA
-# =========================================================
+import processamento as processamento_mod
+
+from processamento import (
+    COLUNA_PRODUTO,
+    COLUNAS_OBRIGATORIAS,
+    consolidar_mensal,
+    processar_base,
+    ranking_produtos_fora,
+    resumo_operacional,
+)
+
+# Mantido localmente para o app não quebrar caso o servidor ainda esteja
+# com uma versão antiga de processamento.py. A compatibilidade completa
+# é validada logo abaixo e gera uma mensagem clara no painel.
+COLUNA_EFETIVACAO = "Data Efetivação"
+VERSAO_PROCESSAMENTO_ESPERADA = "2026-09-15-efetivacao-1diautil-v1"
+
+
 BASE_DIR = Path(__file__).resolve().parent
-LOGO_PATH = BASE_DIR / "logo_mediatorie.png"
+LOGO_PATH = BASE_DIR / "assets" / "logo_mediatorie.png"
+ARQUIVO_PADRAO = BASE_DIR / "base_efetivacao.xlsx"
+ARQUIVO_MOVIMENTACOES_PADRAO = BASE_DIR / "base_movimentacoes.xlsx"
+PERIODO_INICIAL_MOVIMENTACOES = pd.Period("2026-01", freq="M")
+
+VERDE = "#86BC25"
+VERDE_ESCURO = "#5F8E16"
+VERMELHO = "#D64545"
+GRAFITE = "#4B4F4D"
+FUNDO = "#F5F7F2"
+
 
 st.set_page_config(
-    page_title="Dashboard Comercial | Mediatorie",
+    page_title="Indicador Operacional | Mediatorie",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+
+# =========================================================
+# VALIDAÇÃO DE VERSÃO DO PROCESSAMENTO
+# =========================================================
+# Evita o ImportError genérico do Streamlit Cloud quando app.py e
+# processamento.py são publicados em versões diferentes.
+versao_processamento = getattr(processamento_mod, "VERSAO_PROCESSAMENTO", None)
+if versao_processamento != VERSAO_PROCESSAMENTO_ESPERADA:
+    st.error(
+        "O arquivo `processamento.py` do servidor está desatualizado. "
+        "Substitua `app.py` e `processamento.py` juntos pela mesma versão. "
+        f"Versão esperada: {VERSAO_PROCESSAMENTO_ESPERADA}."
+    )
+    st.stop()
+
+
 st.markdown(
-    """
+    f"""
     <style>
-        .block-container {
-            padding-top: 3.8rem !important;
-            padding-bottom: 2rem;
-            max-width: 1500px;
-        }
-
-        [data-testid="stSidebar"] {
-            background-color: #F5F7F2;
-        }
-
-        [data-testid="stMetric"] {
-            background: white;
-            border: 1px solid #E4E9DF;
-            border-left: 5px solid #86BC25;
-            border-radius: 10px;
-            padding: 12px 15px;
-        }
-
-        .titulo-mediatorie {
-            font-size: 2rem;
+        .stApp {{ background-color: {FUNDO}; }}
+        [data-testid="stSidebar"] {{
+            background: linear-gradient(180deg, #FFFFFF 0%, #F0F4EA 100%);
+            border-right: 1px solid #DDE6D3;
+        }}
+        [data-testid="stMetric"] {{
+            background-color: #FFFFFF;
+            border: 1px solid #E2E8DC;
+            border-left: 5px solid {VERDE};
+            border-radius: 12px;
+            padding: 15px 16px;
+            box-shadow: 0 4px 14px rgba(75, 79, 77, 0.06);
+        }}
+        [data-testid="stMetricLabel"] {{ color: #667064; }}
+        [data-testid="stMetricValue"] {{ color: {GRAFITE}; }}
+        div[data-baseweb="tab-list"] {{ gap: 8px; }}
+        button[data-baseweb="tab"] {{
+            background-color: #FFFFFF;
+            border-radius: 9px 9px 0 0;
+            padding: 10px 18px;
+        }}
+        button[data-baseweb="tab"][aria-selected="true"] {{
+            color: {VERDE_ESCURO};
+            border-bottom-color: {VERDE};
+        }}
+        .mediatorie-header {{
+            padding: 6px 0 18px 0;
+        }}
+        .mediatorie-kicker {{
+            color: {VERDE_ESCURO};
+            font-size: 0.85rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }}
+        .mediatorie-title {{
+            color: {GRAFITE};
+            font-size: 2.05rem;
             font-weight: 750;
-            color: #343A36;
-            margin-bottom: 2px;
-        }
-
-        .subtitulo-mediatorie {
-            color: #6B736D;
-            font-size: 1rem;
-        }
+            line-height: 1.15;
+            margin: 4px 0;
+        }}
+        .mediatorie-subtitle {{ color: #69736A; font-size: 1rem; }}
+        .block-container {{ padding-top: 1.4rem; max-width: 1500px; }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-# =========================================================
-# REGRAS FIXAS DO PROCESSO
-# =========================================================
-DESCRICOES_CANCELAMENTO_VALIDAS = [
-    "SEM JUSTA CAUSA",
-    "JUSTA CAUSA",
-    "A PEDIDO DO BENEFICIÁRIO (RN561)",
-    "BENEFÍCIO DEMITIDO/APOSENTADO (RN279)",
-    "DESLIGAMENTO DA EMPRESA (RN279)",
-    "INADIMPLENTE",
-]
-
-DATA_CORTE = pd.Timestamp("2025-12-01")
-
-
-# =========================================================
-# COLUNAS OBRIGATÓRIAS
-# =========================================================
-COLUNAS_BASE_TOTAL = [
-    "Id Corretora",
-    "Tipo Movimentação",
-    "Data Início Beneficiário",
-    "Data Inclusão Vida",
-    "Descrição Status Atual Beneficiário",
-    "Descrição Cancelamento",
-    "Id Acomodação",
-    "Descrição Beneficiário",
-    "Descrição Material",
-    "Descrição Corretora",
-    "Descrição Vendedor",
-    "Descrição Entidade",
-]
-
-COLUNAS_CARTEIRA = [
-    "ID Parceiro",
-    "NOME",
-]
-
-
-# =========================================================
-# LEITURA
-# =========================================================
-@st.cache_data(show_spinner=False, max_entries=4)
-def ler_excel_upload(nome: str, conteudo: bytes) -> pd.DataFrame:
-    """
-    Lê o arquivo uma única vez e mantém em cache entre os reruns
-    do Streamlit. Isso é importante principalmente para a base total.
-    """
+@st.cache_data(show_spinner=False)
+def ler_excel_upload(conteudo: bytes) -> pd.DataFrame:
     return pd.read_excel(BytesIO(conteudo))
 
 
-def validar_colunas(
-    df: pd.DataFrame,
-    colunas_obrigatorias: list[str],
-    nome_base: str,
-) -> None:
-    faltantes = [
-        coluna
-        for coluna in colunas_obrigatorias
-        if coluna not in df.columns
-    ]
+@st.cache_data(show_spinner=False)
+def ler_excel_local(caminho: str, ultima_alteracao: float) -> pd.DataFrame:
+    del ultima_alteracao  # participa da chave do cache
+    return pd.read_excel(caminho)
 
+
+def percentual_br(valor: float) -> str:
+    return f"{valor:.2f}%".replace(".", ",")
+
+
+def cabecalho() -> None:
+    logo, texto = st.columns([1.1, 4.9])
+    with logo:
+        st.image(str(LOGO_PATH), width=230)
+    with texto:
+        st.markdown(
+            """
+            <div class="mediatorie-header">
+                <div class="mediatorie-kicker">Gestão de operações</div>
+                <div class="mediatorie-title">Indicador Operacional</div>
+                <div class="mediatorie-subtitle">
+                    Acompanhamento das efetivações de Saúde e Odonto.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def grafico_percentual(mensal: pd.DataFrame, meta: float, titulo: str) -> go.Figure:
+    fig = go.Figure()
+
+    fig.add_bar(
+        x=mensal["Comp"],
+        y=mensal["Percentual_Dentro"],
+        name="Dentro do SLA",
+        marker_color=VERDE,
+        text=mensal["Percentual_Dentro"].map(percentual_br),
+        textposition="inside",
+        insidetextanchor="middle",
+        textfont=dict(color="#FFFFFF", size=12),
+        customdata=mensal[["Dentro", "Total"]],
+        hovertemplate=(
+            "<b>%{x}</b><br>Dentro: %{customdata[0]:,.0f}"
+            "<br>Total: %{customdata[1]:,.0f}<br>Percentual: %{y:.2f}%<extra></extra>"
+        ),
+    )
+    fig.add_bar(
+        x=mensal["Comp"],
+        y=mensal["Percentual_Fora"],
+        name="Fora do SLA",
+        marker_color=VERMELHO,
+        text=mensal["Percentual_Fora"].map(percentual_br),
+        textposition="inside",
+        insidetextanchor="middle",
+        textfont=dict(color="#FFFFFF", size=12),
+        customdata=mensal[["Fora", "Total"]],
+        hovertemplate=(
+            "<b>%{x}</b><br>Fora: %{customdata[0]:,.0f}"
+            "<br>Total: %{customdata[1]:,.0f}<br>Percentual: %{y:.2f}%<extra></extra>"
+        ),
+    )
+    fig.add_hline(
+        y=meta,
+        line_color=GRAFITE,
+        line_dash="dot",
+        line_width=2,
+        annotation_text=f"Meta {percentual_br(meta)}",
+        annotation_position="top right",
+    )
+    fig.update_layout(
+        title=dict(
+            text=f"{titulo}<br><sup>Participação mensal das efetivações dentro e fora do SLA</sup>",
+            x=0.01,
+        ),
+        barmode="stack",
+        barnorm="percent",
+        height=470,
+        margin=dict(l=35, r=25, t=85, b=55),
+        legend=dict(orientation="h", y=1.11, x=1, xanchor="right"),
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(family="Arial", color=GRAFITE),
+        hovermode="x unified",
+        uniformtext_minsize=10,
+        uniformtext_mode="hide",
+    )
+    fig.update_yaxes(
+        title="Percentual",
+        range=[0, 100],
+        ticksuffix="%",
+        dtick=20,
+        gridcolor="#E8EDE4",
+        zeroline=False,
+    )
+    fig.update_xaxes(title="Competência", showgrid=False)
+    return fig
+
+
+def grafico_quantidade(mensal: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    for coluna, nome, cor in [
+        ("Dentro", "Dentro do SLA", VERDE),
+        ("Fora", "Fora do SLA", VERMELHO),
+    ]:
+        fig.add_bar(
+            x=mensal["Comp"],
+            y=mensal[coluna],
+            name=nome,
+            marker_color=cor,
+            text=mensal[coluna],
+            textposition="inside",
+            textfont=dict(color="#FFFFFF"),
+            hovertemplate=f"<b>%{{x}}</b><br>{nome}: %{{y:,.0f}}<extra></extra>",
+        )
+
+    fig.update_layout(
+        title=dict(text="Volume mensal<br><sup>Quantidade de efetivações por situação</sup>", x=0.01),
+        barmode="stack",
+        height=410,
+        margin=dict(l=30, r=20, t=80, b=50),
+        legend=dict(orientation="h", y=1.12, x=1, xanchor="right"),
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(family="Arial", color=GRAFITE),
+        hovermode="x unified",
+        uniformtext_minsize=9,
+        uniformtext_mode="hide",
+    )
+    fig.update_yaxes(title="Efetivações", gridcolor="#E8EDE4", zeroline=False)
+    fig.update_xaxes(title="Competência", showgrid=False)
+    return fig
+
+
+def grafico_ranking(dados: pd.DataFrame) -> go.Figure | None:
+    ranking = ranking_produtos_fora(dados)
+    ranking = ranking.loc[ranking["Fora"].gt(0)].copy()
+    if ranking.empty:
+        return None
+
+    nomes = ranking[COLUNA_PRODUTO].map(
+        lambda texto: texto if len(texto) <= 38 else texto[:35] + "..."
+    )
+    fig = go.Figure(
+        go.Bar(
+            x=ranking["Fora"],
+            y=nomes,
+            orientation="h",
+            marker_color=VERMELHO,
+            text=ranking["Fora"],
+            textposition="outside",
+            customdata=ranking[[COLUNA_PRODUTO, "Total", "Percentual_Fora"]],
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>Fora: %{x:,.0f}"
+                "<br>Total: %{customdata[1]:,.0f}"
+                "<br>Percentual fora: %{customdata[2]:.2f}%<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title=dict(text="Atenção por produto<br><sup>Produtos com mais efetivações fora do SLA</sup>", x=0.01),
+        height=410,
+        margin=dict(l=20, r=45, t=80, b=50),
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(family="Arial", color=GRAFITE),
+        showlegend=False,
+    )
+    fig.update_xaxes(title="Quantidade fora", gridcolor="#E8EDE4", zeroline=False)
+    fig.update_yaxes(title=None)
+    return fig
+
+
+
+# =========================================================
+# MOVIMENTAÇÕES - SEGUNDA BASE
+# =========================================================
+COLUNAS_MOVIMENTACOES = ["Dt.Modificação", "Dt.Entrada SAP"]
+
+
+def validar_colunas_movimentacoes(df: pd.DataFrame) -> None:
+    faltantes = [coluna for coluna in COLUNAS_MOVIMENTACOES if coluna not in df.columns]
     if faltantes:
         raise KeyError(
-            f"{nome_base}: faltam as colunas: "
-            + ", ".join(faltantes)
+            "Na base de movimentações faltam as colunas: " + ", ".join(faltantes)
         )
 
 
-def normalizar_cabecalho(texto: str) -> str:
-    texto = str(texto).strip()
-    texto = unicodedata.normalize("NFKD", texto)
-    texto = "".join(
-        caractere
-        for caractere in texto
-        if not unicodedata.combining(caractere)
+def calcular_dias_uteis_movimentacao(linha: pd.Series):
+    data_modificacao = linha["Dt.Modificação"]
+    data_entrada = linha["Dt.Entrada SAP"]
+
+    if pd.isna(data_modificacao) or pd.isna(data_entrada):
+        return np.nan
+
+    return np.busday_count(
+        data_modificacao.date().isoformat(),
+        data_entrada.date().isoformat(),
     )
-    return " ".join(texto.upper().split())
 
 
-def localizar_coluna(
-    df: pd.DataFrame,
-    candidatos: list[str],
-) -> str | None:
-    mapa = {
-        normalizar_cabecalho(coluna): coluna
-        for coluna in df.columns
-    }
+@st.cache_data(show_spinner=False)
+def processar_movimentacoes(df_original: pd.DataFrame, sla_dias: int) -> pd.DataFrame:
+    """Aplica a regra do indicador de movimentações na segunda planilha."""
+    df = df_original.copy()
+    df.columns = [str(coluna).strip() for coluna in df.columns]
+    validar_colunas_movimentacoes(df)
 
-    for candidato in candidatos:
-        chave = normalizar_cabecalho(candidato)
-        if chave in mapa:
-            return mapa[chave]
+    df["Dt.Modificação"] = pd.to_datetime(df["Dt.Modificação"], errors="coerce")
+    df["Dt.Entrada SAP"] = pd.to_datetime(df["Dt.Entrada SAP"], errors="coerce")
 
-    return None
+    df["dias_uteis"] = df.apply(calcular_dias_uteis_movimentacao, axis=1).astype("Int64")
 
+    condicoes = [
+        df["dias_uteis"].le(sla_dias),
+        df["dias_uteis"].gt(sla_dias),
+    ]
 
-def padronizar_colunas_comerciais(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Mantém nomes canônicos no restante do código, aceitando pequenas
-    diferenças de cabeçalho encontradas nas planilhas.
-    """
-    df = df.copy()
+    df["Indicador"] = np.select(
+        [condicao.fillna(False).to_numpy(dtype=bool) for condicao in condicoes],
+        ["Dentro do prazo", "Fora do prazo"],
+        default="Verificar",
+    )
 
-    aliases = {
-        "Descrição Material": [
-            "Descrição Material",
-            "Descricao Material",
-        ],
-        "Descrição Corretora": [
-            "Descrição Corretora",
-            "Descrição de Corretora",
-            "Descricao Corretora",
-            "Descricao de Corretora",
-        ],
-        "Descrição Vendedor": [
-            "Descrição Vendedor",
-            "Descrição Vendendor",
-            "Descricao Vendedor",
-            "Descricao Vendendor",
-        ],
-        "Descrição Entidade": [
-            "Descrição Entidade",
-            "Descricao Entidade",
-            "Entidade",
-            "Nome Entidade",
-        ],
-    }
-
-    renomear = {}
-
-    for nome_padrao, candidatos in aliases.items():
-        if nome_padrao in df.columns:
-            continue
-
-        encontrada = localizar_coluna(
-            df,
-            candidatos,
-        )
-
-        if encontrada is not None:
-            renomear[encontrada] = nome_padrao
-
-    if renomear:
-        df = df.rename(columns=renomear)
+    df["Periodo"] = df["Dt.Modificação"].dt.to_period("M")
+    df["Competencia"] = df["Periodo"].dt.strftime("%m/%Y")
+    df.loc[df["Periodo"].isna(), "Competencia"] = "Sem competência"
 
     return df
 
 
-# =========================================================
-# PROCESSAMENTO
-# =========================================================
-@st.cache_data(show_spinner=False, max_entries=2)
-def processar_bases(
-    nome_base: str,
-    bytes_base: bytes,
-    nome_carteira: str,
-    bytes_carteira: bytes,
-):
-    """
-    REPRODUÇÃO DIRETA DO PROCESSO HOMOLOGADO NO NOTEBOOK.
-
-    Não usa nunique.
-    Não altera a chave do merge.
-    Não altera os filtros.
-    Não altera os groupbys.
-    """
-
-    # -----------------------------------------------------
-    # 1. LEITURA
-    # -----------------------------------------------------
-    df = ler_excel_upload(nome_base, bytes_base).copy()
-    carteira_exec = ler_excel_upload(
-        nome_carteira,
-        bytes_carteira,
-    ).copy()
-
-    df.columns = df.columns.astype(str).str.strip()
-    carteira_exec.columns = (
-        carteira_exec.columns.astype(str).str.strip()
-    )
-
-    df = padronizar_colunas_comerciais(df)
-
-    validar_colunas(
-        df,
-        COLUNAS_BASE_TOTAL,
-        "Base Total",
-    )
-    validar_colunas(
-        carteira_exec,
-        COLUNAS_CARTEIRA,
-        "Carteira de Executivos",
-    )
-
-    # -----------------------------------------------------
-    # 2. MERGE - EXATAMENTE COMO NO CÓDIGO ORIGINAL
-    # -----------------------------------------------------
-    df = pd.merge(
-        df,
-        carteira_exec,
-        how="left",
-        right_on="ID Parceiro",
-        left_on="Id Corretora",
-    )
-
-    # -----------------------------------------------------
-    # 3. SOMENTE VIDA NOVA
-    # -----------------------------------------------------
-    df = df[
-        df["Tipo Movimentação"] == "VIDA NOVA"
+def consolidar_movimentacoes_mensal(df: pd.DataFrame) -> pd.DataFrame:
+    """Consolida somente competências de 01/2026 em diante."""
+    validos = df.loc[
+        df["Indicador"].isin(["Dentro do prazo", "Fora do prazo"])
+        & df["Periodo"].notna()
+        & df["Periodo"].ge(PERIODO_INICIAL_MOVIMENTACOES)
     ].copy()
 
-    # -----------------------------------------------------
-    # 4. DATAS E DIFERENÇA
-    # -----------------------------------------------------
-    df["Data Início Beneficiário"] = pd.to_datetime(
-        df["Data Início Beneficiário"],
-        errors="coerce",
-        dayfirst=True,
-    )
-
-    df["Data Inclusão Vida"] = pd.to_datetime(
-        df["Data Inclusão Vida"],
-        errors="coerce",
-        dayfirst=True,
-    )
-
-    df["Diferenca"] = (
-        df["Data Inclusão Vida"]
-        - df["Data Início Beneficiário"]
-    ).dt.days
-
-    # -----------------------------------------------------
-    # 5. DESCRIÇÃO DE CANCELAMENTO - NOVA REGRA HOMOLOGADA
-    # -----------------------------------------------------
-    # Mantém registros cuja descrição esteja na lista permitida
-    # OU esteja vazia/nula.
-    #
-    # Observação:
-    # df["Descrição Cancelamento"].isnull() não deve ficar dentro
-    # da lista passada ao .isin(); a condição de nulo é aplicada
-    # separadamente com OR.
-    mascara_cancelamento = (
-        df["Descrição Cancelamento"].isin(
-            DESCRICOES_CANCELAMENTO_VALIDAS
+    if validos.empty:
+        return pd.DataFrame(
+            columns=[
+                "Periodo",
+                "Competencia",
+                "Quantidade_Dentro",
+                "Quantidade_Fora",
+                "Total",
+                "Percentual_Dentro",
+                "Percentual_Fora",
+            ]
         )
-        | df["Descrição Cancelamento"].isna()
-    )
 
-    df = df[
-        mascara_cancelamento
-    ].copy()
-
-    # -----------------------------------------------------
-    # 6. REGISTROS NÃO CORRETOS
-    # -----------------------------------------------------
-    df_nao_corretos = df[
-        df["Diferenca"] > 0
-    ].copy()
-
-    df_nao_corretos = df_nao_corretos[
-        df_nao_corretos[
-            "Descrição Status Atual Beneficiário"
-        ] == "Ativado"
-    ].copy()
-
-    colunas_nao_corretos = [
-        "Descrição Beneficiário",
-        "Data Início Beneficiário",
-        "Data Inclusão Vida",
-        "Diferenca",
-    ]
-
-    df_nao_corretoss = df_nao_corretos[
-        colunas_nao_corretos
-    ].copy()
-
-    # -----------------------------------------------------
-    # 7. REGISTROS CORRETOS
-    # -----------------------------------------------------
-    df_certo = df[
-        df["Diferenca"] <= 0
-    ].copy()
-
-    df_certo["Data Inclusão Vida"] = pd.to_datetime(
-        df_certo["Data Inclusão Vida"],
-        dayfirst=True,
-        errors="coerce",
-    )
-
-    df_certo["Competencia"] = (
-        df_certo["Data Inclusão Vida"]
-        .dt.strftime("%m/%Y")
-    )
-
-    # -----------------------------------------------------
-    # 8. SAÚDE
-    # Exclui ODO e SEM
-    # -----------------------------------------------------
-    ACOM_SAUDE = ["ODO", "SEM"]
-
-    df_saude = df_certo[
-        ~df_certo["Id Acomodação"].isin(
-            ACOM_SAUDE
-        )
-    ].copy()
-
-    # -----------------------------------------------------
-    # 9. ODONTO
-    # Somente ODO
-    # -----------------------------------------------------
-    ACOM_ODONTO = ["ODO"]
-
-    df_odonto = df_certo[
-        df_certo["Id Acomodação"].isin(
-            ACOM_ODONTO
-        )
-    ].copy()
-
-    # -----------------------------------------------------
-    # 10. SAÚDE - COMPETÊNCIA + EXECUTIVO
-    # -----------------------------------------------------
-    df_saude_agru_comp_analista = (
-        df_saude
-        .groupby(
-            ["Competencia", "NOME"]
-        )
-        .agg(
-            {
-                "Id Corretora": "count",
-            }
-        )
-        .reset_index()
-    )
-
-    df_saude_agru_comp_analista[
-        "Competencia"
-    ] = pd.to_datetime(
-        df_saude_agru_comp_analista[
-            "Competencia"
-        ],
-        format="%m/%Y",
-        errors="coerce",
-    )
-
-    df_saude_agru_comp_analista = (
-        df_saude_agru_comp_analista[
-            df_saude_agru_comp_analista[
-                "Competencia"
-            ] > DATA_CORTE
-        ]
-        .sort_values(
-            ["Competencia", "NOME"]
-        )
-        .reset_index(drop=True)
-    )
-
-    # -----------------------------------------------------
-    # 11. ODONTO - COMPETÊNCIA + EXECUTIVO
-    # -----------------------------------------------------
-    df_odonto_agru_comp_analista = (
-        df_odonto
-        .groupby(
-            ["Competencia", "NOME"]
-        )
-        .agg(
-            {
-                "Id Corretora": "count",
-            }
-        )
-        .reset_index()
-    )
-
-    df_odonto_agru_comp_analista[
-        "Competencia"
-    ] = pd.to_datetime(
-        df_odonto_agru_comp_analista[
-            "Competencia"
-        ],
-        format="%m/%Y",
-        errors="coerce",
-    )
-
-    df_odonto_agru_comp_analista = (
-        df_odonto_agru_comp_analista[
-            df_odonto_agru_comp_analista[
-                "Competencia"
-            ] > DATA_CORTE
-        ]
-        .sort_values(
-            ["Competencia", "NOME"]
-        )
-        .reset_index(drop=True)
-    )
-
-    # -----------------------------------------------------
-    # 12. SAÚDE - TOTAL POR COMPETÊNCIA
-    # -----------------------------------------------------
-    df_saude_group = (
-        df_saude
-        .groupby("Competencia")
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-    )
-
-    df_saude_group["Competencia"] = (
-        pd.to_datetime(
-            df_saude_group["Competencia"],
-            format="%m/%Y",
-            errors="coerce",
-        )
-    )
-
-    df_saude_group = (
-        df_saude_group[
-            df_saude_group[
-                "Competencia"
-            ] > DATA_CORTE
-        ]
-        .sort_values("Competencia")
-        .reset_index(drop=True)
-    )
-
-    # -----------------------------------------------------
-    # 13. ODONTO - TOTAL POR COMPETÊNCIA
-    # -----------------------------------------------------
-    df_odonto_group = (
-        df_odonto
-        .groupby("Competencia")
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-    )
-
-    df_odonto_group["Competencia"] = (
-        pd.to_datetime(
-            df_odonto_group["Competencia"],
-            format="%m/%Y",
-            errors="coerce",
-        )
-    )
-
-    df_odonto_group = (
-        df_odonto_group[
-            df_odonto_group[
-                "Competencia"
-            ] > DATA_CORTE
-        ]
-        .sort_values("Competencia")
-        .reset_index(drop=True)
-    )
-
-    # -----------------------------------------------------
-    # 14. BASE COMERCIAL VÁLIDA PARA OS NOVOS RANKINGS
-    # Mesmas regras já aplicadas acima + competência 01/2026+
-    # -----------------------------------------------------
-    df_comercial = df_certo.copy()
-
-    df_comercial["Competencia_Data"] = pd.to_datetime(
-        df_comercial["Competencia"],
-        format="%m/%Y",
-        errors="coerce",
-    )
-
-    df_comercial = (
-        df_comercial[
-            df_comercial["Competencia_Data"] > DATA_CORTE
-        ]
-        .copy()
-    )
-
-    # -----------------------------------------------------
-    # 15. CLASSIFICAÇÃO DO TIPO DE PRODUTO
-    # -----------------------------------------------------
-    acomodacao = (
-        df_comercial["Id Acomodação"]
-        .astype("string")
-        .str.strip()
-        .str.upper()
-    )
-
-    mapa_tipo_produto = {
-        "AMB": "Ambulatorial",
-        "ENF": "Completo",
-        "QUA": "Completo",
-        "ODO": "Odonto",
-    }
-
-    df_comercial["Tipo Produto"] = (
-        acomodacao
-        .map(mapa_tipo_produto)
-        .fillna("Não classificado")
-    )
-
-    # -----------------------------------------------------
-    # 16. PRODUTOS MAIS VENDIDOS
-    # Regra: Descrição Material -> count(Descrição Beneficiário)
-    # -----------------------------------------------------
-    df_produtos_ranking = (
-        df_comercial
-        .assign(
-            **{
-                "Descrição Material": (
-                    df_comercial["Descrição Material"]
-                    .astype("string")
-                    .fillna("Não informado")
-                    .str.strip()
-                    .replace("", "Não informado")
-                )
-            }
-        )
-        .groupby(
-            "Descrição Material",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
+    mensal = (
+        validos.groupby(["Periodo", "Competencia", "Indicador"], observed=False)
+        .size()
+        .unstack(fill_value=0)
         .reset_index()
         .rename(
             columns={
-                "Descrição Beneficiário": "Quantidade",
+                "Dentro do prazo": "Quantidade_Dentro",
+                "Fora do prazo": "Quantidade_Fora",
             }
         )
-        .sort_values(
-            "Quantidade",
-            ascending=False,
-        )
-        .reset_index(drop=True)
     )
 
-    # -----------------------------------------------------
-    # 17. MAIORES CORRETORAS
-    # Regra: Descrição Corretora -> count(Descrição Beneficiário)
-    # -----------------------------------------------------
-    df_corretoras_ranking = (
-        df_comercial
-        .assign(
-            **{
-                "Descrição Corretora": (
-                    df_comercial["Descrição Corretora"]
-                    .astype("string")
-                    .fillna("Não informado")
-                    .str.strip()
-                    .replace("", "Não informado")
-                )
-            }
-        )
-        .groupby(
-            "Descrição Corretora",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "Descrição Beneficiário": "Quantidade",
-            }
-        )
-        .sort_values(
-            "Quantidade",
-            ascending=False,
-        )
-        .reset_index(drop=True)
+    for coluna in ["Quantidade_Dentro", "Quantidade_Fora"]:
+        if coluna not in mensal.columns:
+            mensal[coluna] = 0
+
+    mensal["Quantidade_Dentro"] = mensal["Quantidade_Dentro"].astype(int)
+    mensal["Quantidade_Fora"] = mensal["Quantidade_Fora"].astype(int)
+    mensal["Total"] = mensal["Quantidade_Dentro"] + mensal["Quantidade_Fora"]
+    mensal["Percentual_Dentro"] = np.where(
+        mensal["Total"].gt(0),
+        mensal["Quantidade_Dentro"] / mensal["Total"] * 100,
+        0,
+    )
+    mensal["Percentual_Fora"] = np.where(
+        mensal["Total"].gt(0),
+        mensal["Quantidade_Fora"] / mensal["Total"] * 100,
+        0,
     )
 
-    # -----------------------------------------------------
-    # 18. MAIORES VENDEDORES
-    # Regra: Descrição Vendedor -> count(Descrição Beneficiário)
-    # -----------------------------------------------------
-    df_vendedores_ranking = (
-        df_comercial
-        .assign(
-            **{
-                "Descrição Vendedor": (
-                    df_comercial["Descrição Vendedor"]
-                    .astype("string")
-                    .fillna("Não informado")
-                    .str.strip()
-                    .replace("", "Não informado")
-                )
-            }
-        )
-        .groupby(
-            "Descrição Vendedor",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "Descrição Beneficiário": "Quantidade",
-            }
-        )
-        .sort_values(
-            "Quantidade",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    # -----------------------------------------------------
-    # 19. DISTRIBUIÇÃO POR TIPO DE PRODUTO
-    # -----------------------------------------------------
-    df_tipo_produto = (
-        df_comercial
-        .groupby(
-            "Tipo Produto",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "Descrição Beneficiário": "Quantidade",
-            }
-        )
-        .sort_values(
-            "Quantidade",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    # Formatação da data apenas na base detalhada.
-    df_certo["Data Inclusão Vida"] = (
-        df_certo["Data Inclusão Vida"]
-        .dt.strftime("%d/%m/%Y")
-    )
-
-    return (
-        df,
-        df_certo,
-        df_nao_corretoss,
-        df_saude,
-        df_odonto,
-        df_saude_agru_comp_analista,
-        df_odonto_agru_comp_analista,
-        df_saude_group,
-        df_odonto_group,
-        df_comercial,
-        df_produtos_ranking,
-        df_corretoras_ranking,
-        df_vendedores_ranking,
-        df_tipo_produto,
-    )
+    return mensal.sort_values("Periodo").reset_index(drop=True)
 
 
-# =========================================================
-# GRÁFICOS
-# =========================================================
-def grafico_total_competencia(
-    dados: pd.DataFrame,
-    titulo: str,
-) -> go.Figure:
+def grafico_movimentacoes_quantidade(mensal: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
 
     fig.add_bar(
-        x=dados["Competencia"],
-        y=dados["Descrição Beneficiário"],
-        text=dados["Descrição Beneficiário"],
-        textposition="outside",
-        marker_color="#86BC25",
-        hovertemplate=(
-            "<b>%{x|%m/%Y}</b><br>"
-            "Quantidade: %{y}<extra></extra>"
-        ),
+        x=mensal["Competencia"],
+        y=mensal["Quantidade_Dentro"],
+        name="Dentro do prazo",
+        marker_color=VERDE,
+        text=mensal["Quantidade_Dentro"].map(lambda valor: f"{int(valor)}" if valor > 0 else ""),
+        textposition="inside",
+        insidetextanchor="middle",
+        textfont=dict(color="#000000", size=12),
+        hovertemplate="<b>%{x}</b><br>Dentro do prazo: %{y:,.0f}<extra></extra>",
+    )
+
+    fig.add_bar(
+        x=mensal["Competencia"],
+        y=mensal["Quantidade_Fora"],
+        name="Fora do prazo",
+        marker_color=VERMELHO,
+        text=mensal["Quantidade_Fora"].map(lambda valor: f"{int(valor)}" if valor > 0 else ""),
+        textposition="inside",
+        insidetextanchor="middle",
+        textfont=dict(color="#000000", size=12),
+        hovertemplate="<b>%{x}</b><br>Fora do prazo: %{y:,.0f}<extra></extra>",
     )
 
     fig.update_layout(
-        title=titulo,
-        height=430,
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        margin=dict(
-            l=35,
-            r=25,
-            t=70,
-            b=50,
+        title=dict(
+            text="Movimentações por competência<br><sup>Quantidade dentro e fora do prazo — a partir de 01/2026</sup>",
+            x=0.01,
         ),
-        showlegend=False,
-        font=dict(
-            family="Arial",
-            color="#404640",
-        ),
+        barmode="stack",
+        height=460,
+        margin=dict(l=35, r=25, t=85, b=55),
+        legend=dict(orientation="h", y=1.11, x=1, xanchor="right"),
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(family="Arial", color=GRAFITE),
+        hovermode="x unified",
+        uniformtext_minsize=10,
+        uniformtext_mode="hide",
     )
-
-    fig.update_xaxes(
-        title="Competência",
-        tickformat="%m/%Y",
-        showgrid=False,
-    )
-
-    fig.update_yaxes(
-        title="Quantidade de beneficiários",
-        gridcolor="#E8EDE4",
-        zeroline=False,
-    )
-
+    fig.update_yaxes(title="Quantidade", gridcolor="#E8EDE4", zeroline=False)
+    fig.update_xaxes(title="Competência", showgrid=False)
     return fig
 
 
-def grafico_por_executivo(
-    dados: pd.DataFrame,
-    titulo: str,
-) -> go.Figure:
-    plot = dados.copy()
-    plot["Competencia_Label"] = (
-        plot["Competencia"].dt.strftime("%m/%Y")
-    )
-
-    fig = px.bar(
-        plot,
-        x="Competencia_Label",
-        y="Id Corretora",
-        color="NOME",
-        barmode="group",
-        text="Id Corretora",
-    )
-
-    fig.update_traces(
-        textposition="outside",
-        hovertemplate=(
-            "<b>%{fullData.name}</b><br>"
-            "Competência: %{x}<br>"
-            "Quantidade: %{y}<extra></extra>"
-        ),
-    )
-
-    fig.update_layout(
-        title=titulo,
-        height=520,
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        margin=dict(
-            l=35,
-            r=25,
-            t=75,
-            b=55,
-        ),
-        legend_title="Executivo",
-        font=dict(
-            family="Arial",
-            color="#404640",
-        ),
-    )
-
-    fig.update_xaxes(
-        title="Competência",
-        showgrid=False,
-    )
-
-    fig.update_yaxes(
-        title="Contagem de Id Corretora",
-        gridcolor="#E8EDE4",
-        zeroline=False,
-    )
-
-    return fig
-
-
-
-
-
-def recalcular_visoes_filtradas(
-    df_filtrado: pd.DataFrame,
-):
-    """
-    Recalcula Saúde, Odonto, executivos e rankings depois dos filtros globais.
-
-    A base recebida já passou por todas as regras homologadas:
-    - merge da carteira;
-    - VIDA NOVA;
-    - regra de Descrição Cancelamento;
-    - Diferenca <= 0;
-    - competência a partir de 01/2026.
-    """
-
-    # -----------------------------------------------------
-    # SAÚDE / ODONTO
-    # -----------------------------------------------------
-    df_saude = df_filtrado[
-        ~df_filtrado["Id Acomodação"].isin(
-            ["ODO", "SEM"]
-        )
-    ].copy()
-
-    df_odonto = df_filtrado[
-        df_filtrado["Id Acomodação"].isin(
-            ["ODO"]
-        )
-    ].copy()
-
-    # -----------------------------------------------------
-    # SAÚDE POR EXECUTIVO
-    # -----------------------------------------------------
-    df_saude_exec = (
-        df_saude
-        .groupby(
-            ["Competencia", "NOME"],
-            dropna=False,
-        )
-        .agg(
-            {
-                "Id Corretora": "count",
-            }
-        )
-        .reset_index()
-    )
-
-    df_saude_exec["Competencia"] = pd.to_datetime(
-        df_saude_exec["Competencia"],
-        format="%m/%Y",
-        errors="coerce",
-    )
-
-    df_saude_exec = (
-        df_saude_exec
-        .sort_values(
-            ["Competencia", "NOME"]
-        )
-        .reset_index(drop=True)
-    )
-
-    # -----------------------------------------------------
-    # ODONTO POR EXECUTIVO
-    # -----------------------------------------------------
-    df_odonto_exec = (
-        df_odonto
-        .groupby(
-            ["Competencia", "NOME"],
-            dropna=False,
-        )
-        .agg(
-            {
-                "Id Corretora": "count",
-            }
-        )
-        .reset_index()
-    )
-
-    df_odonto_exec["Competencia"] = pd.to_datetime(
-        df_odonto_exec["Competencia"],
-        format="%m/%Y",
-        errors="coerce",
-    )
-
-    df_odonto_exec = (
-        df_odonto_exec
-        .sort_values(
-            ["Competencia", "NOME"]
-        )
-        .reset_index(drop=True)
-    )
-
-    # -----------------------------------------------------
-    # SAÚDE POR COMPETÊNCIA
-    # -----------------------------------------------------
-    df_saude_comp = (
-        df_saude
-        .groupby(
-            "Competencia",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-    )
-
-    df_saude_comp["Competencia"] = pd.to_datetime(
-        df_saude_comp["Competencia"],
-        format="%m/%Y",
-        errors="coerce",
-    )
-
-    df_saude_comp = (
-        df_saude_comp
-        .sort_values("Competencia")
-        .reset_index(drop=True)
-    )
-
-    # -----------------------------------------------------
-    # ODONTO POR COMPETÊNCIA
-    # -----------------------------------------------------
-    df_odonto_comp = (
-        df_odonto
-        .groupby(
-            "Competencia",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-    )
-
-    df_odonto_comp["Competencia"] = pd.to_datetime(
-        df_odonto_comp["Competencia"],
-        format="%m/%Y",
-        errors="coerce",
-    )
-
-    df_odonto_comp = (
-        df_odonto_comp
-        .sort_values("Competencia")
-        .reset_index(drop=True)
-    )
-
-    # -----------------------------------------------------
-    # RANKING GENÉRICO
-    # -----------------------------------------------------
-    def ranking_por(coluna: str) -> pd.DataFrame:
-        base = df_filtrado.copy()
-
-        base[coluna] = (
-            base[coluna]
-            .astype("string")
-            .fillna("Não informado")
-            .str.strip()
-            .replace("", "Não informado")
-        )
-
-        return (
-            base
-            .groupby(
-                coluna,
-                dropna=False,
-            )
-            .agg(
-                {
-                    "Descrição Beneficiário": "count",
-                }
-            )
-            .reset_index()
-            .rename(
-                columns={
-                    "Descrição Beneficiário": "Quantidade",
-                }
-            )
-            .sort_values(
-                "Quantidade",
-                ascending=False,
-            )
-            .reset_index(drop=True)
-        )
-
-    df_produtos_ranking = ranking_por(
-        "Descrição Material"
-    )
-
-    df_corretoras_ranking = ranking_por(
-        "Descrição Corretora"
-    )
-
-    df_vendedores_ranking = ranking_por(
-        "Descrição Vendedor"
-    )
-
-    df_entidades_ranking = ranking_por(
-        "Descrição Entidade"
-    )
-
-    df_tipo_produto = (
-        df_filtrado
-        .groupby(
-            "Tipo Produto",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "Descrição Beneficiário": "Quantidade",
-            }
-        )
-        .sort_values(
-            "Quantidade",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    return (
-        df_saude_exec,
-        df_odonto_exec,
-        df_saude_comp,
-        df_odonto_comp,
-        df_produtos_ranking,
-        df_corretoras_ranking,
-        df_vendedores_ranking,
-        df_entidades_ranking,
-        df_tipo_produto,
-    )
-
-
-
-def recalcular_rankings_comerciais(
-    df_comercial_filtrado: pd.DataFrame,
-):
-    """
-    Recalcula todos os rankings comerciais depois do filtro de competência.
-    Mantém as mesmas regras já homologadas.
-    """
-
-    df_produtos_ranking = (
-        df_comercial_filtrado
-        .assign(
-            **{
-                "Descrição Material": (
-                    df_comercial_filtrado["Descrição Material"]
-                    .astype("string")
-                    .fillna("Não informado")
-                    .str.strip()
-                    .replace("", "Não informado")
-                )
-            }
-        )
-        .groupby(
-            "Descrição Material",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "Descrição Beneficiário": "Quantidade",
-            }
-        )
-        .sort_values(
-            "Quantidade",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    df_corretoras_ranking = (
-        df_comercial_filtrado
-        .assign(
-            **{
-                "Descrição Corretora": (
-                    df_comercial_filtrado["Descrição Corretora"]
-                    .astype("string")
-                    .fillna("Não informado")
-                    .str.strip()
-                    .replace("", "Não informado")
-                )
-            }
-        )
-        .groupby(
-            "Descrição Corretora",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "Descrição Beneficiário": "Quantidade",
-            }
-        )
-        .sort_values(
-            "Quantidade",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    df_vendedores_ranking = (
-        df_comercial_filtrado
-        .assign(
-            **{
-                "Descrição Vendedor": (
-                    df_comercial_filtrado["Descrição Vendedor"]
-                    .astype("string")
-                    .fillna("Não informado")
-                    .str.strip()
-                    .replace("", "Não informado")
-                )
-            }
-        )
-        .groupby(
-            "Descrição Vendedor",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "Descrição Beneficiário": "Quantidade",
-            }
-        )
-        .sort_values(
-            "Quantidade",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    df_tipo_produto = (
-        df_comercial_filtrado
-        .groupby(
-            "Tipo Produto",
-            dropna=False,
-        )
-        .agg(
-            {
-                "Descrição Beneficiário": "count",
-            }
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "Descrição Beneficiário": "Quantidade",
-            }
-        )
-        .sort_values(
-            "Quantidade",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    return (
-        df_produtos_ranking,
-        df_corretoras_ranking,
-        df_vendedores_ranking,
-        df_tipo_produto,
-    )
-
-
-
-
-def criar_metas_2026():
-    """
-    Metas comerciais informadas para 2026.
-    Saúde possui a composição Empresarial + Coletivo por Adesão.
-    Odonto possui a meta mensal de vendas novas.
-    """
-    competencias = pd.date_range(
-        start="2026-01-01",
-        end="2026-12-01",
-        freq="MS",
-    )
-
-    meta_saude = pd.DataFrame(
-        {
-            "Competencia": competencias,
-            "Meta Saúde Empresarial": [
-                1928, 1960, 2154, 2335, 2134, 2234,
-                2200, 2477, 2475, 2384, 2646, 2630,
-            ],
-            "Meta Coletivo por Adesão": [
-                134, 154, 163, 167, 165, 171,
-                216, 202, 215, 210, 204, 226,
-            ],
-            "Meta Saúde Total": [
-                2062, 2114, 2317, 2502, 2299, 2405,
-                2416, 2679, 2690, 2594, 2850, 2856,
-            ],
-        }
-    )
-
-    meta_odonto = pd.DataFrame(
-        {
-            "Competencia": competencias,
-            "Meta Odonto": [
-                745, 651, 795, 706, 750, 877,
-                798, 833, 855, 876, 883, 929,
-            ],
-        }
-    )
-
-    return meta_saude, meta_odonto
-
-
-def montar_comparativo_saude(
-    vendido: pd.DataFrame,
-    metas: pd.DataFrame,
-    competencias_selecionadas: list[str],
-) -> pd.DataFrame:
-    competencias_datas = pd.to_datetime(
-        competencias_selecionadas,
-        format="%m/%Y",
-        errors="coerce",
-    )
-
-    base_meta = metas[
-        metas["Competencia"].isin(competencias_datas)
-    ].copy()
-
-    real = vendido[
-        ["Competencia", "Descrição Beneficiário"]
-    ].copy()
-
-    real = real.rename(
-        columns={
-            "Descrição Beneficiário": "Vendido",
-        }
-    )
-
-    comparativo = base_meta.merge(
-        real,
-        how="left",
-        on="Competencia",
-    )
-
-    comparativo["Vendido"] = (
-        comparativo["Vendido"]
-        .fillna(0)
-        .astype(int)
-    )
-
-    comparativo["Diferença"] = (
-        comparativo["Vendido"]
-        - comparativo["Meta Saúde Total"]
-    )
-
-    comparativo["Atingimento (%)"] = (
-        comparativo["Vendido"]
-        / comparativo["Meta Saúde Total"]
-        * 100
-    )
-
-    return comparativo.sort_values(
-        "Competencia"
-    ).reset_index(drop=True)
-
-
-def montar_comparativo_odonto(
-    vendido: pd.DataFrame,
-    metas: pd.DataFrame,
-    competencias_selecionadas: list[str],
-) -> pd.DataFrame:
-    competencias_datas = pd.to_datetime(
-        competencias_selecionadas,
-        format="%m/%Y",
-        errors="coerce",
-    )
-
-    base_meta = metas[
-        metas["Competencia"].isin(competencias_datas)
-    ].copy()
-
-    real = vendido[
-        ["Competencia", "Descrição Beneficiário"]
-    ].copy()
-
-    real = real.rename(
-        columns={
-            "Descrição Beneficiário": "Vendido",
-        }
-    )
-
-    comparativo = base_meta.merge(
-        real,
-        how="left",
-        on="Competencia",
-    )
-
-    comparativo["Vendido"] = (
-        comparativo["Vendido"]
-        .fillna(0)
-        .astype(int)
-    )
-
-    comparativo["Diferença"] = (
-        comparativo["Vendido"]
-        - comparativo["Meta Odonto"]
-    )
-
-    comparativo["Atingimento (%)"] = (
-        comparativo["Vendido"]
-        / comparativo["Meta Odonto"]
-        * 100
-    )
-
-    return comparativo.sort_values(
-        "Competencia"
-    ).reset_index(drop=True)
-
-
-def grafico_vendido_meta(
-    comparativo: pd.DataFrame,
-    coluna_meta: str,
-    titulo: str,
-) -> go.Figure:
-    dados = comparativo.copy()
-    dados["Competencia_Label"] = (
-        dados["Competencia"].dt.strftime("%m/%Y")
-    )
-
+def grafico_movimentacoes_percentual(mensal: pd.DataFrame, meta: float) -> go.Figure:
     fig = go.Figure()
 
     fig.add_bar(
-        x=dados["Competencia_Label"],
-        y=dados[coluna_meta],
-        name="Meta",
-        marker_color="#8B908D",
-        text=dados[coluna_meta],
-        textposition="outside",
+        x=mensal["Competencia"],
+        y=mensal["Percentual_Dentro"],
+        name="Dentro do prazo",
+        marker_color=VERDE,
+        text=mensal["Percentual_Dentro"].map(percentual_br),
+        textposition="inside",
+        insidetextanchor="middle",
+        textfont=dict(color="#000000", size=12),
+        customdata=mensal[["Quantidade_Dentro", "Total"]],
         hovertemplate=(
-            "<b>%{x}</b><br>"
-            "Meta: %{y:,.0f}<extra></extra>"
+            "<b>%{x}</b><br>Dentro: %{customdata[0]:,.0f}"
+            "<br>Total: %{customdata[1]:,.0f}<br>Percentual: %{y:.2f}%<extra></extra>"
         ),
     )
 
     fig.add_bar(
-        x=dados["Competencia_Label"],
-        y=dados["Vendido"],
-        name="Vendido",
-        marker_color="#86BC25",
-        text=dados["Vendido"],
-        textposition="outside",
+        x=mensal["Competencia"],
+        y=mensal["Percentual_Fora"],
+        name="Fora do prazo",
+        marker_color=VERMELHO,
+        text=mensal["Percentual_Fora"].map(percentual_br),
+        textposition="inside",
+        insidetextanchor="middle",
+        textfont=dict(color="#000000", size=12),
+        customdata=mensal[["Quantidade_Fora", "Total"]],
         hovertemplate=(
-            "<b>%{x}</b><br>"
-            "Vendido: %{y:,.0f}<extra></extra>"
+            "<b>%{x}</b><br>Fora: %{customdata[0]:,.0f}"
+            "<br>Total: %{customdata[1]:,.0f}<br>Percentual: %{y:.2f}%<extra></extra>"
         ),
+    )
+
+    fig.add_hline(
+        y=meta,
+        line_color=GRAFITE,
+        line_dash="dot",
+        line_width=2,
+        annotation_text=f"Meta {percentual_br(meta)}",
+        annotation_position="top right",
     )
 
     fig.update_layout(
-        title=titulo,
-        barmode="group",
-        height=470,
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        legend=dict(
-            orientation="h",
-            y=1.12,
-            x=1,
-            xanchor="right",
+        title=dict(
+            text="Percentual de movimentações por competência<br><sup>Participação dentro e fora do prazo — a partir de 01/2026</sup>",
+            x=0.01,
         ),
-        margin=dict(
-            l=35,
-            r=25,
-            t=80,
-            b=50,
-        ),
-        font=dict(
-            family="Arial",
-            color="#404640",
-        ),
+        barmode="stack",
+        height=460,
+        margin=dict(l=35, r=25, t=85, b=55),
+        legend=dict(orientation="h", y=1.11, x=1, xanchor="right"),
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(family="Arial", color=GRAFITE),
+        hovermode="x unified",
+        uniformtext_minsize=10,
+        uniformtext_mode="hide",
     )
-
-    fig.update_xaxes(
-        title="Competência",
-        showgrid=False,
-    )
-
     fig.update_yaxes(
-        title="Quantidade",
+        title="Percentual",
+        range=[0, 100],
+        ticksuffix="%",
+        dtick=20,
         gridcolor="#E8EDE4",
         zeroline=False,
     )
-
+    fig.update_xaxes(title="Competência", showgrid=False)
     return fig
 
 
-def percentual_br(valor: float) -> str:
-    return f"{valor:.1f}%".replace(".", ",")
-
-
-
-def grafico_ranking_comercial(
-    dados: pd.DataFrame,
-    coluna_nome: str,
-    titulo: str,
-    top_n: int = 10,
-) -> go.Figure:
-    ranking = (
-        dados.head(top_n)
-        .sort_values("Quantidade", ascending=True)
-        .copy()
-    )
-
-    fig = go.Figure(
-        go.Bar(
-            x=ranking["Quantidade"],
-            y=ranking[coluna_nome],
-            orientation="h",
-            text=ranking["Quantidade"],
-            textposition="outside",
-            marker_color="#86BC25",
-            hovertemplate=(
-                "<b>%{y}</b><br>"
-                "Quantidade: %{x}<extra></extra>"
-            ),
-        )
-    )
-
-    fig.update_layout(
-        title=titulo,
-        height=max(410, 42 * len(ranking) + 120),
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        showlegend=False,
-        margin=dict(
-            l=20,
-            r=65,
-            t=70,
-            b=45,
-        ),
-        font=dict(
-            family="Arial",
-            color="#404640",
-        ),
-    )
-
-    fig.update_xaxes(
-        title="Quantidade de beneficiários",
-        gridcolor="#E8EDE4",
-        zeroline=False,
-    )
-
-    fig.update_yaxes(
-        title=None,
-    )
-
-    return fig
-
-
-def grafico_tipo_produto(
-    dados: pd.DataFrame,
-) -> go.Figure:
-    fig = go.Figure(
-        go.Bar(
-            x=dados["Tipo Produto"],
-            y=dados["Quantidade"],
-            text=dados["Quantidade"],
-            textposition="outside",
-            marker_color="#86BC25",
-            hovertemplate=(
-                "<b>%{x}</b><br>"
-                "Quantidade: %{y}<extra></extra>"
-            ),
-        )
-    )
-
-    fig.update_layout(
-        title=(
-            "Produção por tipo de produto"
-            "<br><sup>AMB = Ambulatorial | ENF/QUA = Completo | ODO = Odonto</sup>"
-        ),
-        height=430,
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        showlegend=False,
-        margin=dict(
-            l=35,
-            r=25,
-            t=85,
-            b=50,
-        ),
-        font=dict(
-            family="Arial",
-            color="#404640",
-        ),
-    )
-
-    fig.update_xaxes(
-        title="Tipo de produto",
-        showgrid=False,
-    )
-
-    fig.update_yaxes(
-        title="Quantidade de beneficiários",
-        gridcolor="#E8EDE4",
-        zeroline=False,
-    )
-
-    return fig
-
-
-
-def tabela_formatada_competencia(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    resultado = df.copy()
-
-    if "Competencia" in resultado.columns:
-        resultado["Competencia"] = (
-            resultado["Competencia"]
-            .dt.strftime("%m/%Y")
-        )
-
-    return resultado
-
-
-# =========================================================
-# CABEÇALHO
-# =========================================================
-col_logo, col_titulo = st.columns(
-    [0.9, 4.1],
-    vertical_alignment="center",
-)
-
-with col_logo:
-    if LOGO_PATH.exists():
-        st.image(
-            str(LOGO_PATH),
-            width=190,
-        )
-
-with col_titulo:
-    st.markdown(
-        """
-        <div class="titulo-mediatorie">
-            Dashboard Comercial
-        </div>
-        <div class="subtitulo-mediatorie">
-            Mediatorie Administradora de Benefícios
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-st.caption(
-    "O painel reproduz as regras e os agrupamentos do processo já validado em Pandas."
-)
-
-
-# =========================================================
-# UPLOAD
-# =========================================================
-with st.sidebar:
-    st.header("Bases")
-
-    arquivo_base = st.file_uploader(
-        "1. Base Total",
-        type=["xlsx", "xls"],
-        key="upload_base_total",
-        help="Ex.: Itens - 2026-09-17T133257.920.xlsx",
-    )
-
-    arquivo_carteira = st.file_uploader(
-        "2. Carteira de Executivos",
-        type=["xlsx", "xls"],
-        key="upload_carteira",
-        help="Ex.: 2026.09 - atualizado em 15.09.xlsx",
-    )
-
-    st.divider()
-
-    st.markdown("#### Regras fixas")
-    st.caption("Movimentação: VIDA NOVA")
-    st.caption(
-        "Cancelamento aceito: SEM JUSTA CAUSA, JUSTA CAUSA, "
-        "A PEDIDO DO BENEFICIÁRIO (RN561), "
-        "BENEFÍCIO DEMITIDO/APOSENTADO (RN279), "
-        "DESLIGAMENTO DA EMPRESA (RN279), INADIMPLENTE ou vazio."
-    )
-    st.caption("Registros válidos: Diferença ≤ 0")
-    st.caption("Competências disponíveis: 01/2026 em diante")
-
-
-if arquivo_base is None or arquivo_carteira is None:
-    st.info(
-        "Envie as duas planilhas no menu lateral para gerar o dashboard."
-    )
-    st.stop()
-
-
-# =========================================================
-# EXECUÇÃO DO PROCESSO
-# =========================================================
-try:
-    with st.spinner(
-        "Processando Base Total e Carteira de Executivos..."
-    ):
-        (
-            df_merge_filtrado,
-            df_certo,
-            df_nao_corretos,
-            df_saude,
-            df_odonto,
-            df_saude_exec,
-            df_odonto_exec,
-            df_saude_comp,
-            df_odonto_comp,
-            df_comercial,
-            df_produtos_ranking,
-            df_corretoras_ranking,
-            df_vendedores_ranking,
-            df_tipo_produto,
-        ) = processar_bases(
-            arquivo_base.name,
-            arquivo_base.getvalue(),
-            arquivo_carteira.name,
-            arquivo_carteira.getvalue(),
-        )
-
-except Exception as erro:
-    st.error(
-        f"Não foi possível processar as bases: {erro}"
-    )
-    st.stop()
-
-
-# =========================================================
-# FILTROS GLOBAIS
-# =========================================================
-competencias_disponiveis = (
-    df_comercial[
-        ["Competencia_Data", "Competencia"]
-    ]
-    .dropna(subset=["Competencia_Data"])
-    .drop_duplicates()
-    .sort_values("Competencia_Data")
-    ["Competencia"]
-    .tolist()
-)
-
-with st.sidebar:
-    st.divider()
-    st.markdown("### Filtros")
-
-    competencias_selecionadas = st.multiselect(
-        "Competência",
-        options=competencias_disponiveis,
-        default=competencias_disponiveis,
-        help="Selecione um ou mais meses.",
-    )
-
-if not competencias_selecionadas:
-    st.warning(
-        "Selecione pelo menos uma competência para exibir o dashboard."
-    )
-    st.stop()
-
-# Primeiro aplica competência para montar as opções comerciais.
-df_filtros = df_comercial[
-    df_comercial["Competencia"].isin(
-        competencias_selecionadas
-    )
-].copy()
-
-with st.sidebar:
-    materiais_disponiveis = sorted(
-        df_filtros["Descrição Material"]
-        .astype("string")
-        .fillna("Não informado")
-        .str.strip()
-        .replace("", "Não informado")
-        .unique()
-        .tolist()
-    )
-
-    materiais_selecionados = st.multiselect(
-        "Material",
-        options=materiais_disponiveis,
-        default=materiais_disponiveis,
-    )
-
-    corretoras_disponiveis = sorted(
-        df_filtros["Descrição Corretora"]
-        .astype("string")
-        .fillna("Não informado")
-        .str.strip()
-        .replace("", "Não informado")
-        .unique()
-        .tolist()
-    )
-
-    corretoras_selecionadas = st.multiselect(
-        "Corretora",
-        options=corretoras_disponiveis,
-        default=corretoras_disponiveis,
-    )
-
-    vendedores_disponiveis = sorted(
-        df_filtros["Descrição Vendedor"]
-        .astype("string")
-        .fillna("Não informado")
-        .str.strip()
-        .replace("", "Não informado")
-        .unique()
-        .tolist()
-    )
-
-    vendedores_selecionados = st.multiselect(
-        "Vendedor",
-        options=vendedores_disponiveis,
-        default=vendedores_disponiveis,
-    )
-    Entidades_dispniveis = sorted(
-    df_filtros["Descrição Entidade"]
-    .astype("string")
-    .fillna("Não informado")
-    .str.strip()
-    .replace("", "Não informado")
-    .unique()
-    .tolist()
-)
-
-    Entidades_selecionadas = st.multiselect(
-        "Entidade",
-        options=Entidades_dispniveis,
-        default=Entidades_dispniveis,
-    )
-    Acomodação = sorted(
-    df_filtros["Id Acomodação"]
-    .astype("string")
-    .fillna("Não informado")
-    .str.strip()
-    .replace("", "Não informado")
-    .unique()
-    .tolist()
-)
-
-    Acomodação_selecionada = st.multiselect(
-        "Id Acomodação",
-        options=Acomodação,
-        default=Acomodação,
-    )
-
-    st.caption(
-        "Os filtros afetam KPIs, Saúde, Odonto, executivos, "
-        "rankings comerciais e o realizado do comparativo de metas."
-    )
-
-# Padroniza os campos antes de aplicar os filtros.
-for coluna in [
-    "Descrição Material",
-    "Descrição Corretora",
-    "Descrição Vendedor",
-    "Descrição Entidade",
-    "Id Acomodação"
-]:
-    df_filtros[coluna] = (
-        df_filtros[coluna]
-        .astype("string")
-        .fillna("Não informado")
-        .str.strip()
-        .replace("", "Não informado")
-    )
-
-df_comercial = df_filtros[
-    df_filtros["Descrição Material"].isin(
-        materiais_selecionados
-    )
-    & df_filtros["Descrição Corretora"].isin(
-        corretoras_selecionadas
-    )
-    & df_filtros["Descrição Vendedor"].isin(
-        vendedores_selecionados
-    )
-    & df_filtros["Descrição Entidade"].isin(
-        Entidades_selecionadas
-    )
-        & df_filtros["Id Acomodação"].isin(
-        Acomodação_selecionada
-    )
-].copy()
-
-if df_comercial.empty:
-    st.warning(
-        "Nenhum registro corresponde aos filtros selecionados."
-    )
-    st.stop()
-
-# Recalcula todas as visões com a base filtrada.
-(
-    df_saude_exec,
-    df_odonto_exec,
-    df_saude_comp,
-    df_odonto_comp,
-    df_produtos_ranking,
-    df_corretoras_ranking,
-    df_vendedores_ranking,
-    df_entidades_ranking,
-    df_tipo_produto,
-) = recalcular_visoes_filtradas(
-    df_comercial
-)
-
-
-# =========================================================
-# METAS X VENDIDO
-# =========================================================
-meta_saude_2026, meta_odonto_2026 = criar_metas_2026()
-
-comparativo_saude = montar_comparativo_saude(
-    df_saude_comp,
-    meta_saude_2026,
-    competencias_selecionadas,
-)
-
-comparativo_odonto = montar_comparativo_odonto(
-    df_odonto_comp,
-    meta_odonto_2026,
-    competencias_selecionadas,
-)
-
-
-# =========================================================
-# DIAGNÓSTICO DO MERGE
-# =========================================================
-sem_executivo = int(
-    df_merge_filtrado["NOME"].isna().sum()
-)
-
-if sem_executivo:
-    st.warning(
-        f"{sem_executivo:,}".replace(",", ".")
-        + " registro(s) ficaram sem NOME após o merge "
-        "entre Id Corretora e ID Parceiro."
-    )
-
-
-st.caption(
-    "**Competência selecionada:** "
-    + ", ".join(competencias_selecionadas)
-    + f"  |  **Materiais:** {len(materiais_selecionados)}"
-    + f"  |  **Corretoras:** {len(corretoras_selecionadas)}"
-    + f"  |  **Vendedores:** {len(vendedores_selecionados)}"
-)
-
-# =========================================================
-# KPIs
-# Os totais abaixo são obtidos dos mesmos agrupamentos
-# que alimentam os gráficos.
-# =========================================================
-total_saude = int(
-    df_saude_comp["Descrição Beneficiário"].sum()
-) if not df_saude_comp.empty else 0
-
-total_odonto = int(
-    df_odonto_comp["Descrição Beneficiário"].sum()
-) if not df_odonto_comp.empty else 0
-
-total_validos = total_saude + total_odonto
-total_nao_corretos = len(df_nao_corretos)
-
-k1, k2, k3, k4 = st.columns(4)
-
-k1.metric(
-    "Saúde | 01/2026+",
-    f"{total_saude:,}".replace(",", "."),
-)
-
-k2.metric(
-    "Odonto | 01/2026+",
-    f"{total_odonto:,}".replace(",", "."),
-)
-
-k3.metric(
-    "Saúde + Odonto",
-    f"{total_validos:,}".replace(",", "."),
-)
-
-k4.metric(
-    "Diferença > 0",
-    f"{total_nao_corretos:,}".replace(",", "."),
-)
-
-
-# =========================================================
-# DASHBOARD
-# =========================================================
-(
-    aba_geral,
-    aba_metas,
-    aba_saude,
-    aba_odonto,
-    aba_rankings,
-    aba_conferencia,
-) = st.tabs(
-    [
-        "Visão Geral",
-        "Metas",
-        "Saúde",
-        "Odonto",
-        "Rankings Comerciais",
-        "Conferência",
-    ]
-)
-
-
-# ---------------------------------------------------------
-# VISÃO GERAL
-# ---------------------------------------------------------
-with aba_geral:
-    c1, c2 = st.columns(2)
-
-    with c1:
-        if df_saude_comp.empty:
-            st.info(
-                "Sem dados de Saúde para as competências válidas."
-            )
-        else:
-            st.plotly_chart(
-                grafico_total_competencia(
-                    df_saude_comp,
-                    "Saúde por competência",
-                ),
-                use_container_width=True,
-                config={
-                    "displaylogo": False,
-                },
-            )
-
-    with c2:
-        if df_odonto_comp.empty:
-            st.info(
-                "Sem dados de Odonto para as competências válidas."
-            )
-        else:
-            st.plotly_chart(
-                grafico_total_competencia(
-                    df_odonto_comp,
-                    "Odonto por competência",
-                ),
-                use_container_width=True,
-                config={
-                    "displaylogo": False,
-                },
-            )
-
-
-# ---------------------------------------------------------
-# METAS
-# ---------------------------------------------------------
-with aba_metas:
-    st.subheader("Vendido x Meta")
-
-    st.caption(
-        "O realizado utiliza exatamente os mesmos agrupamentos homologados "
-        "do dashboard. A meta é comparada somente às competências selecionadas."
-    )
-
-    # -----------------------------------------------------
-    # KPIs Saúde
-    # -----------------------------------------------------
-    vendido_saude_meta = int(
-        comparativo_saude["Vendido"].sum()
-    ) if not comparativo_saude.empty else 0
-
-    meta_saude_total = int(
-        comparativo_saude["Meta Saúde Total"].sum()
-    ) if not comparativo_saude.empty else 0
-
-    ating_saude = (
-        vendido_saude_meta / meta_saude_total * 100
-        if meta_saude_total
-        else 0
-    )
-
-    diferenca_saude = (
-        vendido_saude_meta - meta_saude_total
-    )
-
-    # -----------------------------------------------------
-    # KPIs Odonto
-    # -----------------------------------------------------
-    vendido_odonto_meta = int(
-        comparativo_odonto["Vendido"].sum()
-    ) if not comparativo_odonto.empty else 0
-
-    meta_odonto_total = int(
-        comparativo_odonto["Meta Odonto"].sum()
-    ) if not comparativo_odonto.empty else 0
-
-    ating_odonto = (
-        vendido_odonto_meta / meta_odonto_total * 100
-        if meta_odonto_total
-        else 0
-    )
-
-    diferenca_odonto = (
-        vendido_odonto_meta - meta_odonto_total
-    )
-
-    st.markdown("#### Saúde")
-
-    s1, s2, s3, s4 = st.columns(4)
-
-    s1.metric(
-        "Vendido",
-        f"{vendido_saude_meta:,}".replace(",", "."),
-    )
-
-    s2.metric(
-        "Meta",
-        f"{meta_saude_total:,}".replace(",", "."),
-    )
-
-    s3.metric(
-        "Atingimento",
-        percentual_br(ating_saude),
-    )
-
-    s4.metric(
-        "Diferença",
-        f"{diferenca_saude:+,}".replace(",", "."),
-    )
-
-    if not comparativo_saude.empty:
-        st.plotly_chart(
-            grafico_vendido_meta(
-                comparativo_saude,
-                "Meta Saúde Total",
-                "Saúde — Vendido x Meta Total",
-            ),
-            use_container_width=True,
-            config={
-                "displaylogo": False,
-            },
-        )
-
-        tabela_saude_meta = comparativo_saude.copy()
-        tabela_saude_meta["Competencia"] = (
-            tabela_saude_meta["Competencia"]
-            .dt.strftime("%m/%Y")
-        )
-
-        st.dataframe(
-            tabela_saude_meta,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Atingimento (%)": st.column_config.NumberColumn(
-                    format="%.1f%%"
-                ),
-            },
-        )
-
-    st.divider()
-    st.markdown("#### Odonto")
-
-    o1, o2, o3, o4 = st.columns(4)
-
-    o1.metric(
-        "Vendido",
-        f"{vendido_odonto_meta:,}".replace(",", "."),
-    )
-
-    o2.metric(
-        "Meta",
-        f"{meta_odonto_total:,}".replace(",", "."),
-    )
-
-    o3.metric(
-        "Atingimento",
-        percentual_br(ating_odonto),
-    )
-
-    o4.metric(
-        "Diferença",
-        f"{diferenca_odonto:+,}".replace(",", "."),
-    )
-
-    if not comparativo_odonto.empty:
-        st.plotly_chart(
-            grafico_vendido_meta(
-                comparativo_odonto,
-                "Meta Odonto",
-                "Odonto — Vendido x Meta",
-            ),
-            use_container_width=True,
-            config={
-                "displaylogo": False,
-            },
-        )
-
-        tabela_odonto_meta = comparativo_odonto.copy()
-        tabela_odonto_meta["Competencia"] = (
-            tabela_odonto_meta["Competencia"]
-            .dt.strftime("%m/%Y")
-        )
-
-        st.dataframe(
-            tabela_odonto_meta,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Atingimento (%)": st.column_config.NumberColumn(
-                    format="%.1f%%"
-                ),
-            },
-        )
-
-
-# ---------------------------------------------------------
-# SAÚDE
-# ---------------------------------------------------------
-with aba_saude:
-    st.subheader("Saúde")
-
-    st.caption(
-        "Regra: Id Acomodação diferente de ODO e SEM."
-    )
-
-    if df_saude_exec.empty:
-        st.info(
-            "Não existem registros de Saúde para o período."
-        )
-    else:
-        st.plotly_chart(
-            grafico_por_executivo(
-                df_saude_exec,
-                "Saúde por competência e executivo",
-            ),
-            use_container_width=True,
-            config={
-                "displaylogo": False,
-            },
-        )
-
-    with st.expander(
-        "Ver agrupamento Saúde por executivo"
-    ):
-        st.dataframe(
-            tabela_formatada_competencia(
-                df_saude_exec
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with st.expander(
-        "Ver agrupamento Saúde por competência"
-    ):
-        st.dataframe(
-            tabela_formatada_competencia(
-                df_saude_comp
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-
-# ---------------------------------------------------------
-# ODONTO
-# ---------------------------------------------------------
-with aba_odonto:
-    st.subheader("Odonto")
-
-    st.caption(
-        "Regra: Id Acomodação igual a ODO."
-    )
-
-    if df_odonto_exec.empty:
-        st.info(
-            "Não existem registros de Odonto para o período."
-        )
-    else:
-        st.plotly_chart(
-            grafico_por_executivo(
-                df_odonto_exec,
-                "Odonto por competência e executivo",
-            ),
-            use_container_width=True,
-            config={
-                "displaylogo": False,
-            },
-        )
-
-    with st.expander(
-        "Ver agrupamento Odonto por executivo"
-    ):
-        st.dataframe(
-            tabela_formatada_competencia(
-                df_odonto_exec
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with st.expander(
-        "Ver agrupamento Odonto por competência"
-    ):
-        st.dataframe(
-            tabela_formatada_competencia(
-                df_odonto_comp
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-
-# ---------------------------------------------------------
-# RANKINGS COMERCIAIS
-# ---------------------------------------------------------
-with aba_rankings:
-    st.subheader("Rankings Comerciais")
-
-    st.caption(
-        "Todos os rankings abaixo utilizam a mesma base válida do processo: "
-        "VIDA NOVA, regra de cancelamento homologada, Diferença ≤ 0 "
-        "e os filtros selecionados no menu lateral."
-    )
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.plotly_chart(
-            grafico_ranking_comercial(
-                df_produtos_ranking,
-                "Descrição Material",
-                "Produtos mais vendidos",
-                top_n=10,
-            ),
-            use_container_width=True,
-            config={
-                "displaylogo": False,
-            },
-        )
-
-    with c2:
-        st.plotly_chart(
-            grafico_ranking_comercial(
-                df_corretoras_ranking,
-                "Descrição Corretora",
-                "Maiores corretoras",
-                top_n=10,
-            ),
-            use_container_width=True,
-            config={
-                "displaylogo": False,
-            },
-        )
-
-    c3, c4 = st.columns(2)
-
-    with c3:
-        st.plotly_chart(
-            grafico_ranking_comercial(
-                df_vendedores_ranking,
-                "Descrição Vendedor",
-                "Maiores vendedores",
-                top_n=10,
-            ),
-            use_container_width=True,
-            config={
-                "displaylogo": False,
-            },
-        )
-
-    with c4:
-        st.plotly_chart(
-            grafico_ranking_comercial(
-                df_entidades_ranking,
-                "Descrição Entidade",
-                "Ranking por entidade",
-                top_n=10,
-            ),
-            use_container_width=True,
-            config={
-                "displaylogo": False,
-            },
-        )
+def exibir_movimentacoes(dados_movimentacoes: pd.DataFrame, meta: float) -> None:
+    mensal = consolidar_movimentacoes_mensal(dados_movimentacoes)
+
+    if mensal.empty:
+        st.warning("Não existem movimentações válidas a partir de 01/2026 para montar os gráficos.")
+        return
+
+    total = int(mensal["Total"].sum())
+    dentro = int(mensal["Quantidade_Dentro"].sum())
+    fora = int(mensal["Quantidade_Fora"].sum())
+    percentual_dentro = (dentro / total * 100) if total else 0.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Movimentações", f"{total:,}".replace(",", "."))
+    c2.metric("Dentro do prazo", f"{dentro:,}".replace(",", "."))
+    c3.metric("Fora do prazo", f"{fora:,}".replace(",", "."))
+    c4.metric("Cumprimento", percentual_br(percentual_dentro))
 
     st.plotly_chart(
-        grafico_tipo_produto(
-            df_tipo_produto,
-        ),
+        grafico_movimentacoes_quantidade(mensal),
         use_container_width=True,
-        config={
-            "displaylogo": False,
-        },
+        config={"displaylogo": False, "locale": "pt-BR"},
+        key="grafico_movimentacoes_quantidade",
+    )
+    st.plotly_chart(
+        grafico_movimentacoes_percentual(mensal, meta),
+        use_container_width=True,
+        config={"displaylogo": False, "locale": "pt-BR"},
+        key="grafico_movimentacoes_percentual",
     )
 
-    (
-        tabela_produto,
-        tabela_corretora,
-        tabela_vendedor,
-        tabela_entidade,
-        tabela_tipo,
-    ) = st.tabs(
-        [
-            "Produtos",
-            "Corretoras",
-            "Vendedores",
-            "Entidades",
-            "Tipo de produto",
+    verificar = int(dados_movimentacoes["Indicador"].eq("Verificar").sum())
+    if verificar:
+        st.caption(
+            f"⚠️ {verificar} registro(s) sem uma das datas obrigatórias foram classificados como Verificar e não entram nos gráficos."
+        )
+
+    with st.expander("Ver consolidação mensal das movimentações"):
+        tabela = mensal.drop(columns="Periodo").rename(
+            columns={
+                "Quantidade_Dentro": "Dentro",
+                "Quantidade_Fora": "Fora",
+                "Percentual_Dentro": "% Dentro",
+                "Percentual_Fora": "% Fora",
+            }
+        )
+        st.dataframe(
+            tabela,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "% Dentro": st.column_config.NumberColumn(format="%.2f%%"),
+                "% Fora": st.column_config.NumberColumn(format="%.2f%%"),
+            },
+        )
+
+def exibir_kpis(dados: pd.DataFrame) -> None:
+    resumo = resumo_operacional(dados)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Efetivações", f"{resumo['total']:,}".replace(",", "."))
+    col2.metric("Dentro do SLA", f"{resumo['dentro']:,}".replace(",", "."))
+    col3.metric("Fora do SLA", f"{resumo['fora']:,}".replace(",", "."))
+    col4.metric("Cumprimento do SLA", percentual_br(resumo["percentual_dentro"]))
+
+    if resumo["sem_data"]:
+        st.caption(
+            f"⚠️ {resumo['sem_data']} registro(s) sem uma das datas obrigatórias "
+            "não entram no cálculo do SLA."
+        )
+
+
+def exibir_secao(dados: pd.DataFrame, titulo: str, meta: float) -> None:
+    if dados.empty:
+        st.info(f"Não existem registros para {titulo.lower()} nos filtros selecionados.")
+        return
+
+    exibir_kpis(dados)
+    mensal = consolidar_mensal(dados)
+    if mensal.empty:
+        st.warning("Não existem registros com datas válidas para montar os gráficos.")
+        return
+
+    st.plotly_chart(
+        grafico_percentual(mensal, meta, f"Cumprimento do SLA — {titulo}"),
+        use_container_width=True,
+        config={"displaylogo": False, "locale": "pt-BR"},
+        key=f"grafico_percentual_{titulo}",
+    )
+
+    coluna_grafico, coluna_ranking = st.columns([1.15, 0.85])
+    with coluna_grafico:
+        st.plotly_chart(
+            grafico_quantidade(mensal),
+            use_container_width=True,
+            config={"displaylogo": False, "locale": "pt-BR"},
+            key=f"grafico_quantidade_{titulo}",
+        )
+    with coluna_ranking:
+        ranking = grafico_ranking(dados)
+        if ranking is None:
+            st.success("Nenhum produto fora do SLA nos filtros selecionados.")
+        else:
+            st.plotly_chart(
+                ranking,
+                use_container_width=True,
+                config={"displaylogo": False, "locale": "pt-BR"},
+                key=f"grafico_ranking_{titulo}",
+            )
+
+    with st.expander("Ver consolidação mensal"):
+        tabela = mensal.drop(columns="Periodo").rename(
+            columns={
+                "Percentual_Fora": "% Fora",
+                "Percentual_Dentro": "% Dentro",
+            }
+        )
+        st.dataframe(
+            tabela,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "% Fora": st.column_config.NumberColumn(format="%.2f%%"),
+                "% Dentro": st.column_config.NumberColumn(format="%.2f%%"),
+            },
+        )
+
+
+
+cabecalho()
+
+# =========================================================
+# ENTRADA DAS DUAS PLANILHAS
+# =========================================================
+with st.sidebar:
+    st.markdown("### Bases de dados")
+    arquivo_efetivacao = st.file_uploader(
+        "1. Base de efetivações",
+        type=["xlsx"],
+        key="upload_efetivacao",
+    )
+    arquivo_movimentacoes = st.file_uploader(
+        "2. Base de movimentações",
+        type=["xlsx"],
+        key="upload_movimentacoes",
+    )
+
+    st.divider()
+    st.markdown("### Regras")
+    sla_movimentacao_dias = st.number_input(
+        "Prazo de Movimentações (dias úteis)",
+        min_value=0,
+        max_value=60,
+        value=4,
+        step=1,
+        help="Este prazo afeta somente o indicador de Movimentações.",
+    )
+    meta_sla = st.slider(
+        "Meta de cumprimento (%)",
+        min_value=0,
+        max_value=100,
+        value=95,
+        step=1,
+    )
+    st.caption(
+        "Efetivação: Vigência Inicio × Data Efetivação, em dias úteis, "
+        "com SLA fixo de até 1 dia útil. "
+        "Movimentações: Dt.Modificação × Dt.Entrada SAP, usando somente o prazo acima."
+    )
+
+
+# =========================================================
+# CARREGAMENTO DA BASE DE EFETIVAÇÕES
+# =========================================================
+try:
+    if arquivo_efetivacao is not None:
+        dados_brutos = ler_excel_upload(arquivo_efetivacao.getvalue())
+        origem_efetivacao = arquivo_efetivacao.name
+    elif ARQUIVO_PADRAO.exists():
+        dados_brutos = ler_excel_local(
+            str(ARQUIVO_PADRAO), ARQUIVO_PADRAO.stat().st_mtime
+        )
+        origem_efetivacao = ARQUIVO_PADRAO.name
+    else:
+        dados_brutos = None
+        origem_efetivacao = None
+
+    if dados_brutos is not None:
+        dados = processar_base(dados_brutos)
+    else:
+        dados = None
+except (KeyError, ValueError, OSError) as erro:
+    st.error(f"Não foi possível processar a base de efetivações: {erro}")
+    st.stop()
+
+
+# =========================================================
+# CARREGAMENTO DA BASE DE MOVIMENTAÇÕES
+# =========================================================
+try:
+    if arquivo_movimentacoes is not None:
+        movimentacoes_brutas = ler_excel_upload(arquivo_movimentacoes.getvalue())
+        origem_movimentacoes = arquivo_movimentacoes.name
+    elif ARQUIVO_MOVIMENTACOES_PADRAO.exists():
+        movimentacoes_brutas = ler_excel_local(
+            str(ARQUIVO_MOVIMENTACOES_PADRAO),
+            ARQUIVO_MOVIMENTACOES_PADRAO.stat().st_mtime,
+        )
+        origem_movimentacoes = ARQUIVO_MOVIMENTACOES_PADRAO.name
+    else:
+        movimentacoes_brutas = None
+        origem_movimentacoes = None
+
+    if movimentacoes_brutas is not None:
+        dados_movimentacoes = processar_movimentacoes(
+            movimentacoes_brutas,
+            int(sla_movimentacao_dias),
+        )
+    else:
+        dados_movimentacoes = None
+except (KeyError, ValueError, OSError) as erro:
+    st.error(f"Não foi possível processar a base de movimentações: {erro}")
+    st.stop()
+
+
+# A aplicação foi pensada para receber as duas planilhas.
+if dados is None or dados_movimentacoes is None:
+    faltantes = []
+    if dados is None:
+        faltantes.append("Base de efetivações")
+    if dados_movimentacoes is None:
+        faltantes.append("Base de movimentações")
+
+    st.info(
+        "Envie as duas planilhas no menu lateral para aplicar as regras e carregar o painel.\n\n"
+        + "Faltando: **" + " e ".join(faltantes) + "**."
+    )
+    st.stop()
+
+
+# =========================================================
+# FILTROS DA BASE DE EFETIVAÇÕES
+# =========================================================
+with st.sidebar:
+    st.divider()
+    st.markdown("### Filtros de efetivação")
+
+    tipos_disponiveis = sorted(dados["Tipo"].dropna().unique().tolist())
+    tipos = st.multiselect(
+        "Segmento",
+        tipos_disponiveis,
+        default=tipos_disponiveis,
+    )
+
+    periodos_disponiveis = (
+        dados.loc[dados["Periodo"].notna(), ["Periodo", "Competência"]]
+        .drop_duplicates()
+        .sort_values("Periodo")["Competência"]
+        .tolist()
+    )
+    if dados["Competência"].eq("Sem competência").any():
+        periodos_disponiveis.append("Sem competência")
+
+    competencias = st.multiselect(
+        "Competência",
+        periodos_disponiveis,
+        default=periodos_disponiveis,
+    )
+
+    st.caption(f"Efetivações: {origem_efetivacao}")
+    st.caption(f"Movimentações: {origem_movimentacoes}")
+
+
+dados_filtrados = dados.loc[
+    dados["Tipo"].isin(tipos) & dados["Competência"].isin(competencias)
+].copy()
+
+if dados_filtrados.empty:
+    st.warning("Nenhum registro de efetivação corresponde aos filtros selecionados.")
+    st.stop()
+
+
+# =========================================================
+# RELATÓRIO GERENCIAL EM PDF
+# =========================================================
+with st.sidebar:
+    st.divider()
+    st.markdown("### Relatório gerencial")
+    st.caption(
+        "Gera um PDF com os indicadores, gráficos, rankings, filtros e regras "
+        "que estão sendo utilizados no painel."
+    )
+
+    if st.button(
+        "Gerar relatório PDF",
+        use_container_width=True,
+        type="primary",
+    ):
+        with st.spinner("Montando relatório gerencial..."):
+            secoes_pdf = []
+
+            for titulo_pdf, base_pdf in [
+                ("Visão geral", dados_filtrados),
+                (
+                    "Saúde",
+                    dados_filtrados.loc[
+                        dados_filtrados["Tipo"].eq("Saúde")
+                    ].copy(),
+                ),
+                (
+                    "Odonto",
+                    dados_filtrados.loc[
+                        dados_filtrados["Tipo"].eq("Odonto")
+                    ].copy(),
+                ),
+            ]:
+                secoes_pdf.append(
+                    {
+                        "titulo": titulo_pdf,
+                        "resumo": resumo_operacional(base_pdf),
+                        "mensal": consolidar_mensal(base_pdf),
+                        "ranking": ranking_produtos_fora(base_pdf),
+                    }
+                )
+
+            mensal_mov_pdf = consolidar_movimentacoes_mensal(
+                dados_movimentacoes
+            )
+
+            total_mov_pdf = int(
+                mensal_mov_pdf["Total"].sum()
+            ) if not mensal_mov_pdf.empty else 0
+
+            dentro_mov_pdf = int(
+                mensal_mov_pdf["Quantidade_Dentro"].sum()
+            ) if not mensal_mov_pdf.empty else 0
+
+            fora_mov_pdf = int(
+                mensal_mov_pdf["Quantidade_Fora"].sum()
+            ) if not mensal_mov_pdf.empty else 0
+
+            percentual_mov_pdf = (
+                dentro_mov_pdf / total_mov_pdf * 100
+                if total_mov_pdf
+                else 0.0
+            )
+
+            movimentacoes_pdf = {
+                "mensal": mensal_mov_pdf,
+                "resumo": {
+                    "total": total_mov_pdf,
+                    "dentro": dentro_mov_pdf,
+                    "fora": fora_mov_pdf,
+                    "percentual_dentro": percentual_mov_pdf,
+                    "verificar": int(
+                        dados_movimentacoes["Indicador"]
+                        .eq("Verificar")
+                        .sum()
+                    ),
+                },
+            }
+
+            st.session_state["relatorio_pdf_bytes"] = gerar_relatorio_pdf(
+                secoes_efetivacao=secoes_pdf,
+                movimentacoes=movimentacoes_pdf,
+                meta_sla=float(meta_sla),
+                sla_movimentacao_dias=int(sla_movimentacao_dias),
+                filtros={
+                    "tipos": tipos,
+                    "competencias": competencias,
+                },
+                origem_efetivacao=origem_efetivacao,
+                origem_movimentacoes=origem_movimentacoes,
+                logo_path=LOGO_PATH,
+            )
+
+    if "relatorio_pdf_bytes" in st.session_state:
+        st.download_button(
+            "Baixar relatório em PDF",
+            data=st.session_state["relatorio_pdf_bytes"],
+            file_name="relatorio_gerencial_indicador_operacional.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+
+# =========================================================
+# ABAS
+# =========================================================
+aba_geral, aba_saude, aba_odonto, aba_movimentacoes, aba_base = st.tabs(
+    ["Visão geral", "Saúde", "Odonto", "Movimentações", "Base tratada"]
+)
+
+with aba_geral:
+    exibir_secao(dados_filtrados, "Visão geral", float(meta_sla))
+
+with aba_saude:
+    exibir_secao(
+        dados_filtrados.loc[dados_filtrados["Tipo"].eq("Saúde")],
+        "Saúde",
+        float(meta_sla),
+    )
+
+with aba_odonto:
+    exibir_secao(
+        dados_filtrados.loc[dados_filtrados["Tipo"].eq("Odonto")],
+        "Odonto",
+        float(meta_sla),
+    )
+
+with aba_movimentacoes:
+    st.subheader("Indicador de Movimentações")
+    st.caption(
+        f"Regra exclusiva de Movimentações: dias úteis entre Dt.Modificação e Dt.Entrada SAP. "
+        f"Até {int(sla_movimentacao_dias)} dia(s) útil(eis) = Dentro do prazo; "
+        f"acima desse prazo = Fora do prazo. "
+        "Os gráficos consideram somente 01/2026 em diante."
+    )
+    exibir_movimentacoes(dados_movimentacoes, float(meta_sla))
+
+with aba_base:
+    st.subheader("Bases tratadas")
+
+    sub_efetivacao, sub_movimentacoes = st.tabs(
+        ["Efetivações", "Movimentações"]
+    )
+
+    with sub_efetivacao:
+        st.caption("Use os filtros da barra lateral para restringir os registros.")
+        colunas_exibir = [
+            coluna
+            for coluna in [
+                "Competência",
+                "Tipo",
+                COLUNA_PRODUTO,
+                "Vigência Inicio",
+                "Data do envio informativo",
+                COLUNA_EFETIVACAO,
+                "Dias para efetivação",
+                "Prazo",
+            ]
+            if coluna in dados_filtrados.columns
         ]
-    )
-
-    with tabela_produto:
         st.dataframe(
-            df_produtos_ranking,
+            dados_filtrados[colunas_exibir],
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "Vigência Inicio": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                "Data do envio informativo": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                COLUNA_EFETIVACAO: st.column_config.DateColumn(format="DD/MM/YYYY"),
+            },
         )
 
-    with tabela_corretora:
+    with sub_movimentacoes:
+        colunas_mov = [
+            coluna
+            for coluna in [
+                "Competencia",
+                "Dt.Modificação",
+                "Dt.Entrada SAP",
+                "dias_uteis",
+                "Indicador",
+            ]
+            if coluna in dados_movimentacoes.columns
+        ]
         st.dataframe(
-            df_corretoras_ranking,
+            dados_movimentacoes[colunas_mov],
             use_container_width=True,
             hide_index=True,
-        )
-
-    with tabela_vendedor:
-        st.dataframe(
-            df_vendedores_ranking,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with tabela_entidade:
-        st.dataframe(
-            df_entidades_ranking,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with tabela_tipo:
-        st.dataframe(
-            df_tipo_produto,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    nao_classificados = int(
-        df_comercial.loc[
-            df_comercial["Tipo Produto"].eq("Não classificado"),
-            "Descrição Beneficiário",
-        ].count()
-    )
-
-    if nao_classificados:
-        st.info(
-            f"{nao_classificados:,}".replace(",", ".")
-            + " registro(s) possuem Id Acomodação diferente de "
-            "AMB, ENF, QUA ou ODO e foram exibidos como 'Não classificado'."
-        )
-
-
-# ---------------------------------------------------------
-# CONFERÊNCIA
-# ---------------------------------------------------------
-with aba_conferencia:
-    st.subheader("Conferência do processamento")
-
-    st.markdown(
-        """
-        Esta aba existe para facilitar a comparação do Streamlit
-        com os DataFrames do notebook original.
-        """
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "Após merge + filtros de status",
-        f"{len(df_merge_filtrado):,}".replace(",", "."),
-    )
-
-    c2.metric(
-        "Diferença ≤ 0",
-        f"{len(df_certo):,}".replace(",", "."),
-    )
-
-    c3.metric(
-        "Diferença > 0",
-        f"{len(df_nao_corretos):,}".replace(",", "."),
-    )
-
-    with st.expander(
-        "Registros com Diferença > 0"
-    ):
-        st.dataframe(
-            df_nao_corretos,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with st.expander(
-        "Base válida após Diferença ≤ 0"
-    ):
-        st.dataframe(
-            df_certo,
-            use_container_width=True,
-            hide_index=True,
+            column_config={
+                "Dt.Modificação": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                "Dt.Entrada SAP": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            },
         )

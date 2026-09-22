@@ -1,52 +1,34 @@
-DASHBOARD COMERCIAL - MEDIATORIE
+ATUALIZAÇÃO - RELATÓRIO GERENCIAL EM PDF
 
-Esta versão reproduz diretamente o código-base homologado.
+Arquivos desta atualização:
+- app.py
+- relatorio_pdf.py
+- requirements.txt
 
-UPLOADS
-1. Base Total
-2. Carteira de Executivos
+O arquivo processamento.py NÃO precisa ser alterado.
 
-MERGE
-left_on  = Id Corretora
-right_on = ID Parceiro
-how      = left
+NOVAS DEPENDÊNCIAS
+- reportlab
+- matplotlib
 
-REGRAS
-- Tipo Movimentação == VIDA NOVA
-- Data Inclusão Vida e Data Início Beneficiário convertidas para datetime
-- Diferenca = Data Inclusão Vida - Data Início Beneficiário
-- Descrição Status Atual Beneficiário == Ativado
-- Descrição Status Atual Contrato == Aprovado
-- Descrição Status Vida em:
-  Ag.Ativação
-  Aposentado / Demitido
-  Ativo
-  Em Análise
-- Base válida: Diferenca <= 0
+COMO FUNCIONA
+1. Envie as duas bases normalmente.
+2. Ajuste prazo, meta e filtros.
+3. Na barra lateral, clique em "Gerar relatório PDF".
+4. Depois clique em "Baixar relatório em PDF".
 
-SAÚDE
-Id Acomodação NÃO está em ['ODO', 'SEM']
+O PDF utiliza o recorte atual do painel e contém:
+- capa com filtros e regras utilizadas;
+- Efetivação - Visão geral;
+- Efetivação - Saúde;
+- Efetivação - Odonto;
+- KPIs de dentro/fora do SLA;
+- gráficos percentuais;
+- gráficos de volume;
+- ranking de produtos fora do SLA;
+- consolidação mensal;
+- Indicador de Movimentações;
+- regras utilizadas.
 
-ODONTO
-Id Acomodação está em ['ODO']
-
-GRÁFICOS / AGRUPAMENTOS
-Saúde por executivo:
-groupby(['Competencia', 'NOME']).agg({'Id Corretora': 'count'})
-
-Odonto por executivo:
-groupby(['Competencia', 'NOME']).agg({'Id Corretora': 'count'})
-
-Saúde por competência:
-groupby('Competencia').agg({'Descrição Beneficiário': 'count'})
-
-Odonto por competência:
-groupby('Competencia').agg({'Descrição Beneficiário': 'count'})
-
-PERÍODO
-Competencia > 2025-12-01
-Portanto, 01/2026 em diante.
-
-EXECUÇÃO
-python -m pip install -r requirements.txt
-streamlit run app.py
+A base bruta/tratada não é inserida linha a linha no PDF, pois o arquivo
+é destinado ao envio gerencial. As tabelas consolidadas fazem parte do relatório.
