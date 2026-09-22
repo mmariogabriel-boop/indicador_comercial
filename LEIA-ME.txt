@@ -1,34 +1,42 @@
-ATUALIZAÇÃO - RELATÓRIO GERENCIAL EM PDF
+DASHBOARD COMERCIAL MEDIATORIE - VERSÃO COM RELATÓRIO PDF
 
-Arquivos desta atualização:
-- app.py
-- relatorio_pdf.py
-- requirements.txt
+ESTE É O PROJETO COMERCIAL.
 
-O arquivo processamento.py NÃO precisa ser alterado.
+Arquivos para subir juntos no Git / Streamlit Cloud:
 
-NOVAS DEPENDÊNCIAS
-- reportlab
-- matplotlib
+app.py
+relatorio_pdf_comercial.py
+requirements.txt
+logo_mediatorie.png
+.streamlit/
+    config.toml
 
-COMO FUNCIONA
-1. Envie as duas bases normalmente.
-2. Ajuste prazo, meta e filtros.
-3. Na barra lateral, clique em "Gerar relatório PDF".
-4. Depois clique em "Baixar relatório em PDF".
+O relatório PDF considera o recorte atual dos filtros:
+- Competência
+- Material
+- Corretora
+- Vendedor
 
-O PDF utiliza o recorte atual do painel e contém:
-- capa com filtros e regras utilizadas;
-- Efetivação - Visão geral;
-- Efetivação - Saúde;
-- Efetivação - Odonto;
-- KPIs de dentro/fora do SLA;
-- gráficos percentuais;
-- gráficos de volume;
-- ranking de produtos fora do SLA;
-- consolidação mensal;
-- Indicador de Movimentações;
+O PDF contém:
+- resumo executivo;
+- Saúde e Odonto por competência;
+- Vendido x Meta de Saúde;
+- Vendido x Meta de Odonto;
+- produção por executivo;
+- produtos mais vendidos;
+- maiores corretoras;
+- maiores vendedores;
+- ranking por entidade;
+- distribuição por tipo de produto;
 - regras utilizadas.
 
-A base bruta/tratada não é inserida linha a linha no PDF, pois o arquivo
-é destinado ao envio gerencial. As tabelas consolidadas fazem parte do relatório.
+IMPORTANTE SOBRE METAS
+Quando Material, Corretora ou Vendedor estiverem filtrados, o "Vendido"
+é recalculado para o recorte selecionado, mas a meta continua sendo
+a meta corporativa mensal cadastrada no dashboard.
+
+COMO USAR
+1. Suba as duas planilhas.
+2. Aplique os filtros desejados.
+3. Clique em "Gerar relatório PDF".
+4. Clique em "Baixar relatório PDF".
