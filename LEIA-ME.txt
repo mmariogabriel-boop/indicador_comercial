@@ -40,3 +40,87 @@ COMO USAR
 2. Aplique os filtros desejados.
 3. Clique em "Gerar relatório PDF".
 4. Clique em "Baixar relatório PDF".
+
+
+ATUALIZAÇÃO - VENDEDORES INTERNOS
+
+Vendedores acompanhados:
+- RENAN AVELINO RICARDO
+- GENIANE CAUS
+- FERNANDA PEREIRA SANTANA
+
+A visão mostra Saúde e Odonto por competência utilizando as mesmas regras
+homologadas do Dashboard Comercial.
+
+A visão respeita os filtros:
+- Competência
+- Material
+- Corretora
+
+O filtro global Vendedor é ignorado dentro da aba Vendedores Internos para
+garantir a exibição dos três vendedores.
+
+ATUALIZAÇÃO - PREVISÃO DE VENDAS
+
+Foi criada uma área para:
+- importar a planilha no modelo da Reunião Semanal;
+- visualizar vidas prospectadas por vendedor;
+- visualizar vidas por Status da Negociação;
+- filtrar vendedor e status;
+- incluir novos registros;
+- editar registros existentes;
+- excluir/adicionar linhas pela tabela;
+- baixar a base atualizada em Excel.
+
+Campos:
+- Vendedor
+- Empresa
+- Plano de Saúde
+- Plano Odonto
+- Pessoa de Contato
+- Data Base
+- Status da Negociação
+- Vidas
+
+A importação reconhece os nomes usados no modelo:
+- Renan Avelino -> RENAN AVELINO RICARDO
+- Geniane Caus -> GENIANE CAUS
+- Fernanda Santana -> FERNANDA PEREIRA SANTANA
+
+Os registros manuais ficam na sessão atual. Para armazenamento permanente
+entre usuários/reinicializações, será necessário usar Google Sheets ou banco.
+
+
+ATUALIZAÇÃO DO PDF - VENDEDORES INTERNOS
+
+O relatório gerencial em PDF agora inclui:
+- resumo total dos Vendedores Internos;
+- Saúde e Odonto;
+- Renan Avelino Ricardo por competência;
+- Geniane Caus por competência;
+- Fernanda Pereira Santana por competência;
+- tabela de consolidação por competência para cada vendedor.
+
+A visão do PDF utiliza o mesmo DataFrame da aba Vendedores Internos.
+
+
+ATUALIZAÇÃO DO RELATÓRIO PDF
+
+1. Vendedores Internos
+- legenda reposicionada para não sobrepor o título;
+- Saúde e Odonto continuam separados por competência.
+
+2. Previsão de Vendas
+O PDF agora inclui:
+- Oportunidades;
+- Vidas prospectadas;
+- Vendedores;
+- Status distintos;
+- gráfico de vidas prospectadas por vendedor;
+- gráfico de vidas por status da negociação;
+- tabela das oportunidades.
+
+3. Executivos
+Foi criada uma aba Executivos no dashboard.
+Os gráficos de Saúde e Odonto são exibidos verticalmente, um abaixo do outro.
+O mesmo padrão foi aplicado ao relatório PDF.

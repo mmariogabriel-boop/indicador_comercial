@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import hashlib
 import unicodedata
 
 import pandas as pd
@@ -10,6 +11,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from relatorio_pdf_comercial import gerar_relatorio_comercial_pdf
+
+from pipeline_vendedores_internos import (
+    VENDEDORES_INTERNOS,
+    COLUNAS_PIPELINE,
+    canonizar_vendedor,
+    carregar_pipeline_excel,
+    exportar_pipeline_excel,
+    preparar_pipeline,
+)
 
 
 # =========================================================
@@ -1580,6 +1590,395 @@ def grafico_tipo_produto(
 
 
 
+
+def criar_visao_vendedores_internos(
+    base: pd.DataFrame,
+) -> pd.DataFrame:
+    dados = base.copy()
+
+    dados["Vendedor Interno"] = (
+        dados["Descrição Vendedor"]
+        .map(canonizar_vendedor)
+    )
+
+    dados = dados[
+        dados["Vendedor Interno"].notna()
+    ].copy()
+
+    def classificar_segmento(valor):
+        valor = (
+            str(valor).strip().upper()
+            if pd.notna(valor)
+            else ""
+        )
+
+        if valor == "ODO":
+            return "Odonto"
+
+        if valor not in {
+            "ODO",
+            "SEM",
+            "",
+        }:
+            return "Saúde"
+
+        return None
+
+    dados["Segmento"] = (
+        dados["Id Acomodação"]
+        .map(classificar_segmento)
+    )
+
+    dados = dados[
+        dados["Segmento"].notna()
+    ].copy()
+
+    if dados.empty:
+        return pd.DataFrame(
+            columns=[
+                "Competencia_Data",
+                "Competencia",
+                "Vendedor Interno",
+                "Segmento",
+                "Quantidade",
+            ]
+        )
+
+    agrupado = (
+        dados
+        .groupby(
+            [
+                "Competencia_Data",
+                "Competencia",
+                "Vendedor Interno",
+                "Segmento",
+            ],
+            dropna=False,
+        )
+        .agg(
+            {
+                "Descrição Beneficiário": "count",
+            }
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "Descrição Beneficiário": "Quantidade",
+            }
+        )
+        .sort_values(
+            [
+                "Competencia_Data",
+                "Vendedor Interno",
+                "Segmento",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+    return agrupado
+
+
+def grafico_vendedor_interno(
+    dados: pd.DataFrame,
+    vendedor: str,
+) -> go.Figure:
+    base = dados[
+        dados["Vendedor Interno"].eq(
+            vendedor
+        )
+    ].copy()
+
+    fig = go.Figure()
+
+    if base.empty:
+        fig.update_layout(
+            title=f"{vendedor} — sem vendas no recorte selecionado",
+            height=420,
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+        )
+        return fig
+
+    competencias = (
+        base[
+            [
+                "Competencia_Data",
+                "Competencia",
+            ]
+        ]
+        .drop_duplicates()
+        .sort_values(
+            "Competencia_Data"
+        )
+        ["Competencia"]
+        .tolist()
+    )
+
+    for segmento, cor in [
+        (
+            "Saúde",
+            "#86BC25",
+        ),
+        (
+            "Odonto",
+            "#6F7772",
+        ),
+    ]:
+        segmento_df = (
+            base[
+                base["Segmento"].eq(
+                    segmento
+                )
+            ]
+            .set_index(
+                "Competencia"
+            )
+        )
+
+        valores = [
+            int(
+                segmento_df.loc[
+                    competencia,
+                    "Quantidade",
+                ]
+            )
+            if competencia in segmento_df.index
+            else 0
+            for competencia in competencias
+        ]
+
+        fig.add_bar(
+            x=competencias,
+            y=valores,
+            name=segmento,
+            text=valores,
+            textposition="outside",
+            marker_color=cor,
+        )
+
+    fig.update_layout(
+        title=(
+            f"{vendedor}"
+            "<br><sup>Quantidade vendida por competência — Saúde x Odonto</sup>"
+        ),
+        barmode="group",
+        height=470,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        margin=dict(
+            l=35,
+            r=25,
+            t=80,
+            b=55,
+        ),
+        legend=dict(
+            orientation="h",
+            y=1.12,
+            x=1,
+            xanchor="right",
+        ),
+        font=dict(
+            family="Arial",
+            color="#404640",
+        ),
+    )
+
+    fig.update_xaxes(
+        title="Competência",
+        showgrid=False,
+    )
+
+    fig.update_yaxes(
+        title="Quantidade de beneficiários",
+        gridcolor="#E8EDE4",
+        zeroline=False,
+    )
+
+    return fig
+
+
+def grafico_total_vendedores_internos(
+    dados: pd.DataFrame,
+) -> go.Figure:
+    total = (
+        dados
+        .groupby(
+            [
+                "Vendedor Interno",
+                "Segmento",
+            ],
+            dropna=False,
+        )
+        ["Quantidade"]
+        .sum()
+        .reset_index()
+    )
+
+    fig = px.bar(
+        total,
+        x="Vendedor Interno",
+        y="Quantidade",
+        color="Segmento",
+        barmode="group",
+        text="Quantidade",
+        color_discrete_map={
+            "Saúde": "#86BC25",
+            "Odonto": "#6F7772",
+        },
+    )
+
+    fig.update_traces(
+        textposition="outside",
+    )
+
+    fig.update_layout(
+        title=(
+            "Vendedores Internos"
+            "<br><sup>Produção total no recorte selecionado</sup>"
+        ),
+        height=450,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        legend_title=None,
+        font=dict(
+            family="Arial",
+            color="#404640",
+        ),
+    )
+
+    fig.update_xaxes(
+        title=None,
+        showgrid=False,
+    )
+
+    fig.update_yaxes(
+        title="Quantidade de beneficiários",
+        gridcolor="#E8EDE4",
+        zeroline=False,
+    )
+
+    return fig
+
+
+def grafico_pipeline_por_vendedor(
+    dados: pd.DataFrame,
+) -> go.Figure:
+    resumo = (
+        dados
+        .groupby(
+            "Vendedor",
+            dropna=False,
+        )
+        ["Vidas"]
+        .sum()
+        .reset_index()
+        .sort_values(
+            "Vidas",
+            ascending=False,
+        )
+    )
+
+    fig = px.bar(
+        resumo,
+        x="Vendedor",
+        y="Vidas",
+        text="Vidas",
+    )
+
+    fig.update_traces(
+        marker_color="#86BC25",
+        textposition="outside",
+    )
+
+    fig.update_layout(
+        title="Vidas prospectadas por vendedor",
+        height=420,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(
+            family="Arial",
+            color="#404640",
+        ),
+        xaxis_title=None,
+        yaxis_title="Vidas",
+    )
+
+    return fig
+
+
+def grafico_pipeline_por_status(
+    dados: pd.DataFrame,
+) -> go.Figure:
+    resumo = (
+        dados
+        .assign(
+            **{
+                "Status da Negociação": (
+                    dados[
+                        "Status da Negociação"
+                    ]
+                    .astype("string")
+                    .fillna("Não informado")
+                    .str.strip()
+                    .replace(
+                        "",
+                        "Não informado",
+                    )
+                )
+            }
+        )
+        .groupby(
+            "Status da Negociação",
+            dropna=False,
+        )
+        ["Vidas"]
+        .sum()
+        .reset_index()
+        .sort_values(
+            "Vidas",
+            ascending=False,
+        )
+        .head(15)
+        .sort_values(
+            "Vidas",
+            ascending=True,
+        )
+    )
+
+    fig = px.bar(
+        resumo,
+        x="Vidas",
+        y="Status da Negociação",
+        orientation="h",
+        text="Vidas",
+    )
+
+    fig.update_traces(
+        marker_color="#86BC25",
+        textposition="outside",
+    )
+
+    fig.update_layout(
+        title="Vidas por status da negociação",
+        height=max(
+            430,
+            len(resumo) * 38 + 140,
+        ),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(
+            family="Arial",
+            color="#404640",
+        ),
+        xaxis_title="Vidas",
+        yaxis_title=None,
+    )
+
+    return fig
+
+
+
 def tabela_formatada_competencia(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -1810,14 +2209,17 @@ for coluna in [
         .replace("", "Não informado")
     )
 
-df_comercial = df_filtros[
+df_comercial_base_internos = df_filtros[
     df_filtros["Descrição Material"].isin(
         materiais_selecionados
     )
     & df_filtros["Descrição Corretora"].isin(
         corretoras_selecionadas
     )
-    & df_filtros["Descrição Vendedor"].isin(
+].copy()
+
+df_comercial = df_comercial_base_internos[
+    df_comercial_base_internos["Descrição Vendedor"].isin(
         vendedores_selecionados
     )
 ].copy()
@@ -1841,6 +2243,10 @@ if df_comercial.empty:
     df_tipo_produto,
 ) = recalcular_visoes_filtradas(
     df_comercial
+)
+
+df_vendedores_internos = criar_visao_vendedores_internos(
+    df_comercial_base_internos
 )
 
 
@@ -1933,7 +2339,7 @@ with st.sidebar:
 
     st.caption(
         "Gera um PDF com o recorte atual do Dashboard Comercial, "
-        "incluindo metas, executivos e rankings."
+        "incluindo metas, executivos, vendedores internos, previsão de vendas e rankings."
     )
 
     if st.button(
@@ -1942,6 +2348,47 @@ with st.sidebar:
         type="primary",
     ):
         with st.spinner("Montando relatório comercial..."):
+            pipeline_pdf = preparar_pipeline(
+                st.session_state.get(
+                    "pipeline_vendas_internas",
+                    pd.DataFrame(columns=COLUNAS_PIPELINE),
+                )
+            )
+
+            if not pipeline_pdf.empty:
+                pipeline_pdf["Status da Negociação"] = (
+                    pipeline_pdf["Status da Negociação"]
+                    .astype("string")
+                    .fillna("Não informado")
+                    .str.strip()
+                    .replace("", "Não informado")
+                )
+
+                vendedores_pipeline_pdf = st.session_state.get(
+                    "filtro_pipeline_vendedor",
+                    VENDEDORES_INTERNOS,
+                )
+
+                status_disponiveis_pdf = sorted(
+                    pipeline_pdf["Status da Negociação"]
+                    .unique()
+                    .tolist()
+                )
+
+                status_pipeline_pdf = st.session_state.get(
+                    "filtro_pipeline_status",
+                    status_disponiveis_pdf,
+                )
+
+                pipeline_pdf = pipeline_pdf[
+                    pipeline_pdf["Vendedor"].isin(
+                        vendedores_pipeline_pdf
+                    )
+                    & pipeline_pdf["Status da Negociação"].isin(
+                        status_pipeline_pdf
+                    )
+                ].copy()
+
             st.session_state["relatorio_comercial_pdf"] = (
                 gerar_relatorio_comercial_pdf(
                     logo_path=LOGO_PATH,
@@ -1974,6 +2421,8 @@ with st.sidebar:
                     df_vendedores_ranking=df_vendedores_ranking,
                     df_entidades_ranking=df_entidades_ranking,
                     df_tipo_produto=df_tipo_produto,
+                    df_vendedores_internos=df_vendedores_internos,
+                    df_pipeline_vendas=pipeline_pdf,
                 )
             )
 
@@ -1993,6 +2442,9 @@ with st.sidebar:
 (
     aba_geral,
     aba_metas,
+    aba_executivos,
+    aba_vendedores_internos,
+    aba_previsao_vendas,
     aba_saude,
     aba_odonto,
     aba_rankings,
@@ -2001,6 +2453,9 @@ with st.sidebar:
     [
         "Visão Geral",
         "Metas",
+        "Executivos",
+        "Vendedores Internos",
+        "Previsão de Vendas",
         "Saúde",
         "Odonto",
         "Rankings Comerciais",
@@ -2210,6 +2665,565 @@ with aba_metas:
                     format="%.1f%%"
                 ),
             },
+        )
+
+
+# ---------------------------------------------------------
+# EXECUTIVOS
+# ---------------------------------------------------------
+with aba_executivos:
+    st.subheader("Produção por Executivo")
+
+    st.caption(
+        "Os gráficos abaixo utilizam os mesmos agrupamentos homologados "
+        "e respeitam os filtros globais do Dashboard Comercial."
+    )
+
+    st.markdown("#### Saúde")
+
+    if df_saude_exec.empty:
+        st.info(
+            "Não existem registros de Saúde para o período selecionado."
+        )
+    else:
+        st.plotly_chart(
+            grafico_por_executivo(
+                df_saude_exec,
+                "Saúde por competência e executivo",
+            ),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+            },
+            key="executivos_saude_vertical",
+        )
+
+    st.divider()
+
+    st.markdown("#### Odonto")
+
+    if df_odonto_exec.empty:
+        st.info(
+            "Não existem registros de Odonto para o período selecionado."
+        )
+    else:
+        st.plotly_chart(
+            grafico_por_executivo(
+                df_odonto_exec,
+                "Odonto por competência e executivo",
+            ),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+            },
+            key="executivos_odonto_vertical",
+        )
+
+
+# ---------------------------------------------------------
+# VENDEDORES INTERNOS
+# ---------------------------------------------------------
+with aba_vendedores_internos:
+    st.subheader("Vendedores Internos")
+
+    st.caption(
+        "Esta visão utiliza as mesmas regras homologadas do Dashboard Comercial "
+        "e respeita os filtros de Competência, Material e Corretora. "
+        "O filtro global de Vendedor é ignorado aqui para manter os três vendedores internos visíveis."
+    )
+
+    if df_vendedores_internos.empty:
+        st.info(
+            "Não foram encontradas vendas dos vendedores internos no recorte selecionado."
+        )
+    else:
+        st.plotly_chart(
+            grafico_total_vendedores_internos(
+                df_vendedores_internos
+            ),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+            },
+        )
+
+    tabs_vendedores = st.tabs(
+        VENDEDORES_INTERNOS
+    )
+
+    for vendedor, aba_vendedor in zip(
+        VENDEDORES_INTERNOS,
+        tabs_vendedores,
+    ):
+        with aba_vendedor:
+            base_vendedor = df_vendedores_internos[
+                df_vendedores_internos[
+                    "Vendedor Interno"
+                ].eq(vendedor)
+            ].copy()
+
+            total_saude_vendedor = int(
+                base_vendedor.loc[
+                    base_vendedor["Segmento"].eq("Saúde"),
+                    "Quantidade",
+                ].sum()
+            )
+
+            total_odonto_vendedor = int(
+                base_vendedor.loc[
+                    base_vendedor["Segmento"].eq("Odonto"),
+                    "Quantidade",
+                ].sum()
+            )
+
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric(
+                "Saúde",
+                f"{total_saude_vendedor:,}".replace(",", "."),
+            )
+
+            c2.metric(
+                "Odonto",
+                f"{total_odonto_vendedor:,}".replace(",", "."),
+            )
+
+            c3.metric(
+                "Total",
+                f"{total_saude_vendedor + total_odonto_vendedor:,}".replace(",", "."),
+            )
+
+            st.plotly_chart(
+                grafico_vendedor_interno(
+                    df_vendedores_internos,
+                    vendedor,
+                ),
+                use_container_width=True,
+                config={
+                    "displaylogo": False,
+                },
+            )
+
+            if not base_vendedor.empty:
+                tabela_vendedor = (
+                    base_vendedor[
+                        [
+                            "Competencia",
+                            "Segmento",
+                            "Quantidade",
+                        ]
+                    ]
+                    .copy()
+                    .sort_values(
+                        [
+                            "Competencia",
+                            "Segmento",
+                        ]
+                    )
+                )
+
+                st.dataframe(
+                    tabela_vendedor,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+
+# ---------------------------------------------------------
+# PREVISÃO DE VENDAS / PIPELINE DOS CONSULTORES INTERNOS
+# ---------------------------------------------------------
+with aba_previsao_vendas:
+    st.subheader("Previsão de Vendas — Consultores Internos")
+
+    st.caption(
+        "A importação aceita o mesmo formato da planilha de reunião semanal enviada "
+        "e também o formato plano exportado pelo próprio dashboard."
+    )
+
+    arquivo_pipeline = st.file_uploader(
+        "Subir planilha de previsão de vendas",
+        type=[
+            "xlsx",
+            "xls",
+        ],
+        key="upload_pipeline_interno",
+    )
+
+    if (
+        "pipeline_vendas_internas"
+        not in st.session_state
+    ):
+        st.session_state[
+            "pipeline_vendas_internas"
+        ] = pd.DataFrame(
+            columns=COLUNAS_PIPELINE
+        )
+
+    if arquivo_pipeline is not None:
+        conteudo_pipeline = (
+            arquivo_pipeline.getvalue()
+        )
+
+        assinatura_pipeline = hashlib.sha256(
+            conteudo_pipeline
+        ).hexdigest()
+
+        if (
+            st.session_state.get(
+                "pipeline_upload_assinatura"
+            )
+            != assinatura_pipeline
+        ):
+            try:
+                pipeline_importado = (
+                    carregar_pipeline_excel(
+                        arquivo_pipeline.name,
+                        conteudo_pipeline,
+                    )
+                )
+
+                st.session_state[
+                    "pipeline_vendas_internas"
+                ] = pipeline_importado
+
+                st.session_state[
+                    "pipeline_upload_assinatura"
+                ] = assinatura_pipeline
+
+                st.session_state.pop(
+                    "editor_pipeline_vendas_internas",
+                    None,
+                )
+
+                st.success(
+                    f"{len(pipeline_importado)} registro(s) importado(s) da previsão de vendas."
+                )
+
+            except Exception as erro:
+                st.error(
+                    f"Não foi possível ler a planilha de previsão: {erro}"
+                )
+
+    pipeline_atual = preparar_pipeline(
+        st.session_state[
+            "pipeline_vendas_internas"
+        ]
+    )
+
+    st.session_state[
+        "pipeline_vendas_internas"
+    ] = pipeline_atual
+
+    sub_acompanhamento, sub_cadastro = st.tabs(
+        [
+            "Acompanhamento",
+            "Cadastro e edição",
+        ]
+    )
+
+    with sub_acompanhamento:
+        if pipeline_atual.empty:
+            st.info(
+                "Suba a planilha de previsão ou inclua um novo registro na aba Cadastro e edição."
+            )
+
+        else:
+            vendedores_pipeline = st.multiselect(
+                "Vendedores",
+                options=VENDEDORES_INTERNOS,
+                default=VENDEDORES_INTERNOS,
+                key="filtro_pipeline_vendedor",
+            )
+
+            status_disponiveis = sorted(
+                pipeline_atual[
+                    "Status da Negociação"
+                ]
+                .astype("string")
+                .fillna("Não informado")
+                .str.strip()
+                .replace(
+                    "",
+                    "Não informado",
+                )
+                .unique()
+                .tolist()
+            )
+
+            status_pipeline = st.multiselect(
+                "Status da negociação",
+                options=status_disponiveis,
+                default=status_disponiveis,
+                key="filtro_pipeline_status",
+            )
+
+            pipeline_view = pipeline_atual.copy()
+
+            pipeline_view[
+                "Status da Negociação"
+            ] = (
+                pipeline_view[
+                    "Status da Negociação"
+                ]
+                .astype("string")
+                .fillna("Não informado")
+                .str.strip()
+                .replace(
+                    "",
+                    "Não informado",
+                )
+            )
+
+            pipeline_view = pipeline_view[
+                pipeline_view["Vendedor"].isin(
+                    vendedores_pipeline
+                )
+                & pipeline_view[
+                    "Status da Negociação"
+                ].isin(
+                    status_pipeline
+                )
+            ].copy()
+
+            total_registros = len(
+                pipeline_view
+            )
+
+            total_vidas_pipeline = int(
+                pd.to_numeric(
+                    pipeline_view["Vidas"],
+                    errors="coerce",
+                )
+                .fillna(0)
+                .sum()
+            )
+
+            total_vendedores_pipeline = int(
+                pipeline_view[
+                    "Vendedor"
+                ].nunique()
+            )
+
+            total_status_pipeline = int(
+                pipeline_view[
+                    "Status da Negociação"
+                ].nunique()
+            )
+
+            p1, p2, p3, p4 = st.columns(4)
+
+            p1.metric(
+                "Oportunidades",
+                f"{total_registros:,}".replace(",", "."),
+            )
+
+            p2.metric(
+                "Vidas prospectadas",
+                f"{total_vidas_pipeline:,}".replace(",", "."),
+            )
+
+            p3.metric(
+                "Vendedores",
+                total_vendedores_pipeline,
+            )
+
+            p4.metric(
+                "Status distintos",
+                total_status_pipeline,
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.plotly_chart(
+                    grafico_pipeline_por_vendedor(
+                        pipeline_view
+                    ),
+                    use_container_width=True,
+                    config={
+                        "displaylogo": False,
+                    },
+                )
+
+            with col2:
+                st.plotly_chart(
+                    grafico_pipeline_por_status(
+                        pipeline_view
+                    ),
+                    use_container_width=True,
+                    config={
+                        "displaylogo": False,
+                    },
+                )
+
+            st.dataframe(
+                pipeline_view,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with sub_cadastro:
+        st.markdown("#### Incluir novo registro")
+
+        with st.form(
+            "form_novo_registro_pipeline",
+            clear_on_submit=True,
+        ):
+            f1, f2 = st.columns(2)
+
+            with f1:
+                novo_vendedor = st.selectbox(
+                    "Vendedor",
+                    VENDEDORES_INTERNOS,
+                )
+
+                nova_empresa = st.text_input(
+                    "Empresa"
+                )
+
+                novo_plano_saude = st.text_input(
+                    "Plano de Saúde"
+                )
+
+                novo_plano_odonto = st.text_input(
+                    "Plano Odonto"
+                )
+
+            with f2:
+                novo_contato = st.text_input(
+                    "Pessoa de Contato"
+                )
+
+                nova_data_base = st.text_input(
+                    "Data Base",
+                    help="Ex.: NOVEMBRO, MAIO ou outra referência usada pela equipe.",
+                )
+
+                novo_status = st.text_input(
+                    "Status da Negociação"
+                )
+
+                novas_vidas = st.number_input(
+                    "Vidas",
+                    min_value=0,
+                    step=1,
+                    value=0,
+                )
+
+            incluir_registro = st.form_submit_button(
+                "Incluir registro",
+                use_container_width=True,
+            )
+
+        if incluir_registro:
+            if not nova_empresa.strip():
+                st.error(
+                    "Informe a empresa para incluir o registro."
+                )
+            else:
+                novo_registro = pd.DataFrame(
+                    [
+                        {
+                            "Vendedor": novo_vendedor,
+                            "Empresa": nova_empresa,
+                            "Plano de Saúde": novo_plano_saude,
+                            "Plano Odonto": novo_plano_odonto,
+                            "Pessoa de Contato": novo_contato,
+                            "Data Base": nova_data_base,
+                            "Status da Negociação": novo_status,
+                            "Vidas": int(novas_vidas),
+                        }
+                    ]
+                )
+
+                atualizado = pd.concat(
+                    [
+                        pipeline_atual,
+                        novo_registro,
+                    ],
+                    ignore_index=True,
+                )
+
+                st.session_state[
+                    "pipeline_vendas_internas"
+                ] = preparar_pipeline(
+                    atualizado
+                )
+
+                st.session_state.pop(
+                    "editor_pipeline_vendas_internas",
+                    None,
+                )
+
+                st.success(
+                    "Registro incluído."
+                )
+
+                st.rerun()
+
+        st.markdown("#### Editar registros")
+
+        st.caption(
+            "Você pode alterar vendedor, empresa, planos, contato, status e vidas diretamente na tabela. "
+            "Também é possível adicionar ou excluir linhas."
+        )
+
+        editado = st.data_editor(
+            pipeline_atual,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            key="editor_pipeline_vendas_internas",
+            column_config={
+                "Vendedor": st.column_config.SelectboxColumn(
+                    "Vendedor",
+                    options=VENDEDORES_INTERNOS,
+                    required=True,
+                ),
+                "Vidas": st.column_config.NumberColumn(
+                    "Vidas",
+                    min_value=0,
+                    step=1,
+                    format="%d",
+                ),
+            },
+        )
+
+        editado_limpo = preparar_pipeline(
+            editado
+        )
+
+        if not editado_limpo.equals(
+            pipeline_atual
+        ):
+            st.session_state[
+                "pipeline_vendas_internas"
+            ] = editado_limpo
+
+        arquivo_pipeline_atualizado = (
+            exportar_pipeline_excel(
+                st.session_state[
+                    "pipeline_vendas_internas"
+                ]
+            )
+        )
+
+        st.download_button(
+            "Baixar pipeline atualizado",
+            data=arquivo_pipeline_atualizado,
+            file_name="pipeline_vendedores_internos.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+        )
+
+        st.info(
+            "Os registros incluídos ou alterados ficam na sessão atual do Streamlit. "
+            "Use o botão acima para salvar a versão atualizada. "
+            "Para persistência compartilhada entre usuários e reinicializações, "
+            "o próximo passo é conectar esta base a uma planilha online ou banco de dados."
         )
 
 

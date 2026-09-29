@@ -369,6 +369,871 @@ def _grafico_tipo_produto(df_tipo: pd.DataFrame):
     return fig
 
 
+
+VENDEDORES_INTERNOS_ORDEM = [
+    "RENAN AVELINO RICARDO",
+    "GENIANE CAUS",
+    "FERNANDA PEREIRA SANTANA",
+]
+
+
+def _grafico_vendedores_internos_total(
+    dados: pd.DataFrame,
+):
+    fig, ax = plt.subplots(
+        figsize=(10.8, 4.7)
+    )
+
+    if dados.empty:
+        ax.text(
+            0.5,
+            0.5,
+            "Sem vendas dos vendedores internos no recorte selecionado",
+            ha="center",
+            va="center",
+        )
+        ax.axis("off")
+        return fig
+
+    base = (
+        dados
+        .groupby(
+            [
+                "Vendedor Interno",
+                "Segmento",
+            ],
+            dropna=False,
+        )
+        ["Quantidade"]
+        .sum()
+        .reset_index()
+    )
+
+    vendedores = [
+        vendedor
+        for vendedor in VENDEDORES_INTERNOS_ORDEM
+        if vendedor in base["Vendedor Interno"].tolist()
+    ]
+
+    for vendedor in base["Vendedor Interno"].dropna().unique():
+        if vendedor not in vendedores:
+            vendedores.append(vendedor)
+
+    saude = []
+    odonto = []
+
+    for vendedor in vendedores:
+        dados_vendedor = base[
+            base["Vendedor Interno"].eq(vendedor)
+        ]
+
+        saude.append(
+            int(
+                dados_vendedor.loc[
+                    dados_vendedor["Segmento"].eq("Saúde"),
+                    "Quantidade",
+                ].sum()
+            )
+        )
+
+        odonto.append(
+            int(
+                dados_vendedor.loc[
+                    dados_vendedor["Segmento"].eq("Odonto"),
+                    "Quantidade",
+                ].sum()
+            )
+        )
+
+    x = np.arange(len(vendedores))
+    width = 0.36
+
+    ax.bar(
+        x - width / 2,
+        saude,
+        width,
+        label="Saúde",
+        color=VERDE,
+    )
+
+    ax.bar(
+        x + width / 2,
+        odonto,
+        width,
+        label="Odonto",
+        color="#6F7772",
+    )
+
+    for i, valor in enumerate(saude):
+        if valor:
+            ax.text(
+                i - width / 2,
+                valor,
+                str(valor),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                fontweight="bold",
+            )
+
+    for i, valor in enumerate(odonto):
+        if valor:
+            ax.text(
+                i + width / 2,
+                valor,
+                str(valor),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                fontweight="bold",
+            )
+
+    nomes_curto = [
+        vendedor.title()
+        for vendedor in vendedores
+    ]
+
+    ax.set_title(
+        "Vendedores Internos - produção no período selecionado",
+        loc="left",
+        fontweight="bold",
+    )
+
+    ax.set_ylabel(
+        "Quantidade de beneficiários"
+    )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        nomes_curto,
+        rotation=15,
+        ha="right",
+    )
+
+    ax.grid(
+        axis="y",
+        alpha=0.18,
+    )
+
+    maior_total = max(
+        saude + odonto
+    ) if (saude or odonto) else 0
+
+    if maior_total > 0:
+        ax.set_ylim(
+            0,
+            maior_total * 1.20,
+        )
+
+    ax.legend(
+        frameon=False,
+        ncol=2,
+        loc="upper right",
+    )
+
+    fig.tight_layout()
+
+    return fig
+
+
+def _grafico_vendedor_interno_competencia(
+    dados: pd.DataFrame,
+    vendedor: str,
+):
+    fig, ax = plt.subplots(
+        figsize=(10.8, 4.7)
+    )
+
+    base = dados[
+        dados["Vendedor Interno"].eq(vendedor)
+    ].copy()
+
+    if base.empty:
+        ax.text(
+            0.5,
+            0.5,
+            "Sem vendas no recorte selecionado",
+            ha="center",
+            va="center",
+        )
+        ax.axis("off")
+        return fig
+
+    competencias_base = (
+        base[
+            [
+                "Competencia_Data",
+                "Competencia",
+            ]
+        ]
+        .drop_duplicates()
+        .sort_values("Competencia_Data")
+    )
+
+    competencias = competencias_base[
+        "Competencia"
+    ].astype(str).tolist()
+
+    labels = []
+
+    for competencia in competencias:
+        try:
+            labels.append(
+                pd.to_datetime(
+                    competencia,
+                    format="%m/%Y",
+                    errors="coerce",
+                ).strftime("%m/%Y")
+            )
+        except Exception:
+            labels.append(str(competencia))
+
+    saude = []
+    odonto = []
+
+    for competencia in competencias:
+        base_comp = base[
+            base["Competencia"].astype(str).eq(
+                str(competencia)
+            )
+        ]
+
+        saude.append(
+            int(
+                base_comp.loc[
+                    base_comp["Segmento"].eq("Saúde"),
+                    "Quantidade",
+                ].sum()
+            )
+        )
+
+        odonto.append(
+            int(
+                base_comp.loc[
+                    base_comp["Segmento"].eq("Odonto"),
+                    "Quantidade",
+                ].sum()
+            )
+        )
+
+    x = np.arange(len(labels))
+    width = 0.36
+
+    ax.bar(
+        x - width / 2,
+        saude,
+        width,
+        label="Saúde",
+        color=VERDE,
+    )
+
+    ax.bar(
+        x + width / 2,
+        odonto,
+        width,
+        label="Odonto",
+        color="#6F7772",
+    )
+
+    for i, valor in enumerate(saude):
+        if valor:
+            ax.text(
+                i - width / 2,
+                valor,
+                str(valor),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+    for i, valor in enumerate(odonto):
+        if valor:
+            ax.text(
+                i + width / 2,
+                valor,
+                str(valor),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+    ax.set_title(
+        f"{vendedor.title()} - Saúde x Odonto por competência",
+        loc="left",
+        fontweight="bold",
+        pad=14,
+    )
+
+    ax.set_ylabel(
+        "Quantidade de beneficiários"
+    )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        labels,
+        rotation=35,
+        ha="right",
+    )
+
+    maior_valor = max(
+        saude + odonto
+    ) if (saude or odonto) else 0
+
+    if maior_valor > 0:
+        ax.set_ylim(
+            0,
+            maior_valor * 1.22,
+        )
+
+    ax.grid(
+        axis="y",
+        alpha=0.18,
+    )
+
+    # A legenda fica dentro da área do gráfico, no canto superior direito,
+    # sem disputar espaço com o título.
+    ax.legend(
+        frameon=False,
+        ncol=2,
+        loc="upper right",
+    )
+
+    fig.tight_layout()
+
+    return fig
+
+
+def _tabela_vendedor_interno(
+    dados: pd.DataFrame,
+    vendedor: str,
+):
+    base = dados[
+        dados["Vendedor Interno"].eq(vendedor)
+    ].copy()
+
+    if base.empty:
+        return None
+
+    pivot = (
+        base
+        .pivot_table(
+            index=[
+                "Competencia_Data",
+                "Competencia",
+            ],
+            columns="Segmento",
+            values="Quantidade",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        .reset_index()
+        .sort_values("Competencia_Data")
+    )
+
+    for coluna in [
+        "Saúde",
+        "Odonto",
+    ]:
+        if coluna not in pivot.columns:
+            pivot[coluna] = 0
+
+    pivot["Total"] = (
+        pivot["Saúde"]
+        + pivot["Odonto"]
+    )
+
+    linhas = [
+        [
+            "Competência",
+            "Saúde",
+            "Odonto",
+            "Total",
+        ]
+    ]
+
+    for _, row in pivot.iterrows():
+        linhas.append(
+            [
+                str(row["Competencia"]),
+                _numero(row["Saúde"]),
+                _numero(row["Odonto"]),
+                _numero(row["Total"]),
+            ]
+        )
+
+    tabela = Table(
+        linhas,
+        repeatRows=1,
+        colWidths=[
+            42 * mm,
+            40 * mm,
+            40 * mm,
+            40 * mm,
+        ],
+    )
+
+    tabela.setStyle(
+        TableStyle(
+            [
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, 0),
+                    colors.HexColor(VERDE),
+                ),
+                (
+                    "TEXTCOLOR",
+                    (0, 0),
+                    (-1, 0),
+                    colors.white,
+                ),
+                (
+                    "FONTNAME",
+                    (0, 0),
+                    (-1, 0),
+                    "Helvetica-Bold",
+                ),
+                (
+                    "FONTSIZE",
+                    (0, 0),
+                    (-1, -1),
+                    8,
+                ),
+                (
+                    "ALIGN",
+                    (1, 1),
+                    (-1, -1),
+                    "CENTER",
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.35,
+                    colors.HexColor("#DDE6D8"),
+                ),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [
+                        colors.white,
+                        colors.HexColor("#F8FAF6"),
+                    ],
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5,
+                ),
+            ]
+        )
+    )
+
+    return tabela
+
+
+
+
+def _grafico_pipeline_vendedor_pdf(
+    dados: pd.DataFrame,
+):
+    fig, ax = plt.subplots(
+        figsize=(10.8, 4.4)
+    )
+
+    if dados.empty:
+        ax.text(
+            0.5,
+            0.5,
+            "Sem previsão de vendas carregada",
+            ha="center",
+            va="center",
+        )
+        ax.axis("off")
+        return fig
+
+    resumo = (
+        dados
+        .groupby(
+            "Vendedor",
+            dropna=False,
+        )
+        ["Vidas"]
+        .sum()
+        .sort_values(
+            ascending=False
+        )
+    )
+
+    nomes = [
+        str(nome).title()
+        for nome in resumo.index
+    ]
+
+    valores = resumo.astype(int).tolist()
+
+    x = np.arange(
+        len(nomes)
+    )
+
+    ax.bar(
+        x,
+        valores,
+        color=VERDE,
+    )
+
+    for i, valor in enumerate(valores):
+        ax.text(
+            i,
+            valor,
+            _numero(valor),
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            fontweight="bold",
+        )
+
+    if valores:
+        ax.set_ylim(
+            0,
+            max(valores) * 1.18,
+        )
+
+    ax.set_title(
+        "Previsão de Vendas - vidas prospectadas por vendedor",
+        loc="left",
+        fontweight="bold",
+    )
+
+    ax.set_ylabel(
+        "Vidas"
+    )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        nomes,
+        rotation=12,
+        ha="right",
+    )
+
+    ax.grid(
+        axis="y",
+        alpha=0.18,
+    )
+
+    fig.tight_layout()
+
+    return fig
+
+
+def _quebrar_status_pdf(
+    texto: object,
+    largura: int = 42,
+) -> str:
+    texto = str(texto)
+
+    if len(texto) <= largura:
+        return texto
+
+    palavras = texto.split()
+    linhas = []
+    linha = []
+
+    tamanho = 0
+
+    for palavra in palavras:
+        novo_tamanho = (
+            tamanho
+            + len(palavra)
+            + (1 if linha else 0)
+        )
+
+        if novo_tamanho > largura and linha:
+            linhas.append(
+                " ".join(linha)
+            )
+            linha = [palavra]
+            tamanho = len(palavra)
+        else:
+            linha.append(palavra)
+            tamanho = novo_tamanho
+
+    if linha:
+        linhas.append(
+            " ".join(linha)
+        )
+
+    return "\n".join(
+        linhas[:3]
+    )
+
+
+def _grafico_pipeline_status_pdf(
+    dados: pd.DataFrame,
+):
+    fig, ax = plt.subplots(
+        figsize=(10.8, 6.0)
+    )
+
+    if dados.empty:
+        ax.text(
+            0.5,
+            0.5,
+            "Sem previsão de vendas carregada",
+            ha="center",
+            va="center",
+        )
+        ax.axis("off")
+        return fig
+
+    base = dados.copy()
+
+    base["Status da Negociação"] = (
+        base[
+            "Status da Negociação"
+        ]
+        .astype("string")
+        .fillna("Não informado")
+        .str.strip()
+        .replace(
+            "",
+            "Não informado",
+        )
+    )
+
+    resumo = (
+        base
+        .groupby(
+            "Status da Negociação",
+            dropna=False,
+        )
+        ["Vidas"]
+        .sum()
+        .sort_values(
+            ascending=False
+        )
+        .head(15)
+        .sort_values(
+            ascending=True
+        )
+    )
+
+    nomes = [
+        _quebrar_status_pdf(
+            nome
+        )
+        for nome in resumo.index
+    ]
+
+    valores = resumo.astype(int).tolist()
+
+    y = np.arange(
+        len(nomes)
+    )
+
+    ax.barh(
+        y,
+        valores,
+        color=VERDE,
+    )
+
+    for i, valor in enumerate(valores):
+        ax.text(
+            valor,
+            i,
+            f" {_numero(valor)}",
+            va="center",
+            fontsize=8,
+        )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(
+        nomes,
+        fontsize=7.3,
+    )
+
+    ax.set_title(
+        "Previsão de Vendas - vidas por status da negociação",
+        loc="left",
+        fontweight="bold",
+    )
+
+    ax.set_xlabel(
+        "Vidas"
+    )
+
+    ax.grid(
+        axis="x",
+        alpha=0.18,
+    )
+
+    fig.tight_layout()
+
+    return fig
+
+
+def _tabela_pipeline_pdf(
+    dados: pd.DataFrame,
+):
+    if dados.empty:
+        return None
+
+    base = dados.copy()
+
+    base["Vidas"] = pd.to_numeric(
+        base["Vidas"],
+        errors="coerce",
+    ).fillna(0).astype(int)
+
+    linhas = [
+        [
+            _table_text(
+                "Vendedor",
+                bold=True,
+                color="#FFFFFF",
+                size=7.5,
+            ),
+            _table_text(
+                "Empresa",
+                bold=True,
+                color="#FFFFFF",
+                size=7.5,
+            ),
+            _table_text(
+                "Status da Negociação",
+                bold=True,
+                color="#FFFFFF",
+                size=7.5,
+            ),
+            _table_text(
+                "Vidas",
+                bold=True,
+                color="#FFFFFF",
+                size=7.5,
+            ),
+        ]
+    ]
+
+    for _, row in base.iterrows():
+        linhas.append(
+            [
+                _table_text(
+                    str(
+                        row.get(
+                            "Vendedor",
+                            "",
+                        )
+                    ).title(),
+                    size=7.0,
+                ),
+                _table_text(
+                    row.get(
+                        "Empresa",
+                        "",
+                    ),
+                    size=7.0,
+                ),
+                _table_text(
+                    row.get(
+                        "Status da Negociação",
+                        "",
+                    ),
+                    size=6.8,
+                ),
+                _table_text(
+                    _numero(
+                        row.get(
+                            "Vidas",
+                            0,
+                        )
+                    ),
+                    size=7.0,
+                ),
+            ]
+        )
+
+    tabela = Table(
+        linhas,
+        repeatRows=1,
+        colWidths=[
+            39 * mm,
+            49 * mm,
+            64 * mm,
+            18 * mm,
+        ],
+    )
+
+    tabela.setStyle(
+        TableStyle(
+            [
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, 0),
+                    colors.HexColor(
+                        VERDE
+                    ),
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "TOP",
+                ),
+                (
+                    "ALIGN",
+                    (3, 1),
+                    (3, -1),
+                    "CENTER",
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.35,
+                    colors.HexColor(
+                        "#DDE6D8"
+                    ),
+                ),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [
+                        colors.white,
+                        colors.HexColor(
+                            "#F8FAF6"
+                        ),
+                    ],
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    4,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    4,
+                ),
+            ]
+        )
+    )
+
+    return tabela
+
+
+
 def _tabela_dataframe(
     df: pd.DataFrame,
     colunas: list[str],
@@ -447,6 +1312,8 @@ def gerar_relatorio_comercial_pdf(
     df_vendedores_ranking: pd.DataFrame,
     df_entidades_ranking: pd.DataFrame,
     df_tipo_produto: pd.DataFrame,
+    df_vendedores_internos: pd.DataFrame,
+    df_pipeline_vendas: pd.DataFrame,
 ) -> bytes:
     """Gera o relatório comercial gerencial completo em PDF."""
 
@@ -723,24 +1590,389 @@ def gerar_relatorio_comercial_pdf(
     # =====================================================
     # EXECUTIVOS
     # =====================================================
-    story.append(Paragraph("Produção por executivo", styles["Section"]))
+    story.append(
+        Paragraph(
+            "Produção por executivo",
+            styles["Section"],
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Saúde",
+            styles["BodyMediatorie"],
+        )
+    )
+
     story.append(
         _fig_para_imagem(
             _grafico_executivos(
                 df_saude_exec,
                 "Saúde - produção por executivo",
-            )
+            ),
+            largura_mm=164,
         )
     )
-    story.append(Spacer(1, 3 * mm))
+
+    story.append(
+        Spacer(
+            1,
+            5 * mm,
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Odonto",
+            styles["BodyMediatorie"],
+        )
+    )
+
     story.append(
         _fig_para_imagem(
             _grafico_executivos(
                 df_odonto_exec,
                 "Odonto - produção por executivo",
-            )
+            ),
+            largura_mm=164,
         )
     )
+
+    story.append(PageBreak())
+
+    # =====================================================
+    # VENDEDORES INTERNOS
+    # =====================================================
+    story.append(
+        Paragraph(
+            "Vendedores Internos",
+            styles["Section"],
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Produção dos vendedores internos utilizando as mesmas regras homologadas do Dashboard Comercial. "
+            "Esta visão considera o recorte de Competência, Material e Corretora utilizado pela aba Vendedores Internos.",
+            styles["BodyMediatorie"],
+        )
+    )
+
+    if df_vendedores_internos.empty:
+        story.append(
+            Paragraph(
+                "Não foram encontradas vendas dos vendedores internos no recorte selecionado.",
+                styles["BodyMediatorie"],
+            )
+        )
+    else:
+        total_saude_internos = int(
+            df_vendedores_internos.loc[
+                df_vendedores_internos["Segmento"].eq("Saúde"),
+                "Quantidade",
+            ].sum()
+        )
+
+        total_odonto_internos = int(
+            df_vendedores_internos.loc[
+                df_vendedores_internos["Segmento"].eq("Odonto"),
+                "Quantidade",
+            ].sum()
+        )
+
+        story.append(
+            _kpi_table(
+                [
+                    (
+                        "Saúde",
+                        _numero(total_saude_internos),
+                    ),
+                    (
+                        "Odonto",
+                        _numero(total_odonto_internos),
+                    ),
+                    (
+                        "Total",
+                        _numero(
+                            total_saude_internos
+                            + total_odonto_internos
+                        ),
+                    ),
+                    (
+                        "Vendedores",
+                        _numero(
+                            df_vendedores_internos[
+                                "Vendedor Interno"
+                            ].nunique()
+                        ),
+                    ),
+                ]
+            )
+        )
+
+        story.append(
+            Spacer(
+                1,
+                4 * mm,
+            )
+        )
+
+        story.append(
+            _fig_para_imagem(
+                _grafico_vendedores_internos_total(
+                    df_vendedores_internos
+                )
+            )
+        )
+
+        for vendedor in VENDEDORES_INTERNOS_ORDEM:
+            story.append(
+                PageBreak()
+            )
+
+            story.append(
+                Paragraph(
+                    vendedor.title(),
+                    styles["Section"],
+                )
+            )
+
+            base_vendedor = df_vendedores_internos[
+                df_vendedores_internos[
+                    "Vendedor Interno"
+                ].eq(vendedor)
+            ].copy()
+
+            total_saude_vendedor = int(
+                base_vendedor.loc[
+                    base_vendedor["Segmento"].eq("Saúde"),
+                    "Quantidade",
+                ].sum()
+            )
+
+            total_odonto_vendedor = int(
+                base_vendedor.loc[
+                    base_vendedor["Segmento"].eq("Odonto"),
+                    "Quantidade",
+                ].sum()
+            )
+
+            story.append(
+                _kpi_table(
+                    [
+                        (
+                            "Saúde",
+                            _numero(
+                                total_saude_vendedor
+                            ),
+                        ),
+                        (
+                            "Odonto",
+                            _numero(
+                                total_odonto_vendedor
+                            ),
+                        ),
+                        (
+                            "Total",
+                            _numero(
+                                total_saude_vendedor
+                                + total_odonto_vendedor
+                            ),
+                        ),
+                    ]
+                )
+            )
+
+            story.append(
+                Spacer(
+                    1,
+                    4 * mm,
+                )
+            )
+
+            story.append(
+                _fig_para_imagem(
+                    _grafico_vendedor_interno_competencia(
+                        df_vendedores_internos,
+                        vendedor,
+                    )
+                )
+            )
+
+            tabela_interno = (
+                _tabela_vendedor_interno(
+                    df_vendedores_internos,
+                    vendedor,
+                )
+            )
+
+            if tabela_interno is not None:
+                story.append(
+                    Spacer(
+                        1,
+                        3 * mm,
+                    )
+                )
+
+                story.append(
+                    Paragraph(
+                        "Consolidação por competência",
+                        styles["BodyMediatorie"],
+                    )
+                )
+
+                story.append(
+                    tabela_interno
+                )
+
+    story.append(PageBreak())
+
+    # =====================================================
+    # PREVISÃO DE VENDAS
+    # =====================================================
+    story.append(
+        Paragraph(
+            "Previsão de Vendas",
+            styles["Section"],
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Pipeline dos vendedores internos conforme a base carregada e os filtros de Vendedor e Status da Negociação utilizados na aba Previsão de Vendas.",
+            styles["BodyMediatorie"],
+        )
+    )
+
+    if df_pipeline_vendas.empty:
+        story.append(
+            Paragraph(
+                "Nenhum registro de previsão de vendas estava disponível no momento da geração do relatório.",
+                styles["BodyMediatorie"],
+            )
+        )
+    else:
+        total_oportunidades_pipeline = len(
+            df_pipeline_vendas
+        )
+
+        total_vidas_pipeline = int(
+            pd.to_numeric(
+                df_pipeline_vendas["Vidas"],
+                errors="coerce",
+            )
+            .fillna(0)
+            .sum()
+        )
+
+        total_vendedores_pipeline = int(
+            df_pipeline_vendas[
+                "Vendedor"
+            ].nunique()
+        )
+
+        status_pipeline_pdf = (
+            df_pipeline_vendas[
+                "Status da Negociação"
+            ]
+            .astype("string")
+            .fillna("Não informado")
+            .str.strip()
+            .replace(
+                "",
+                "Não informado",
+            )
+        )
+
+        total_status_pipeline = int(
+            status_pipeline_pdf.nunique()
+        )
+
+        story.append(
+            _kpi_table(
+                [
+                    (
+                        "Oportunidades",
+                        _numero(
+                            total_oportunidades_pipeline
+                        ),
+                    ),
+                    (
+                        "Vidas prospectadas",
+                        _numero(
+                            total_vidas_pipeline
+                        ),
+                    ),
+                    (
+                        "Vendedores",
+                        _numero(
+                            total_vendedores_pipeline
+                        ),
+                    ),
+                    (
+                        "Status distintos",
+                        _numero(
+                            total_status_pipeline
+                        ),
+                    ),
+                ]
+            )
+        )
+
+        story.append(
+            Spacer(
+                1,
+                4 * mm,
+            )
+        )
+
+        # Um gráfico por linha, para preservar legibilidade no PDF.
+        story.append(
+            _fig_para_imagem(
+                _grafico_pipeline_vendedor_pdf(
+                    df_pipeline_vendas
+                ),
+                largura_mm=164,
+            )
+        )
+
+        story.append(
+            Spacer(
+                1,
+                5 * mm,
+            )
+        )
+
+        story.append(
+            _fig_para_imagem(
+                _grafico_pipeline_status_pdf(
+                    df_pipeline_vendas
+                ),
+                largura_mm=164,
+            )
+        )
+
+        story.append(
+            PageBreak()
+        )
+
+        story.append(
+            Paragraph(
+                "Oportunidades da Previsão de Vendas",
+                styles["Section"],
+            )
+        )
+
+        tabela_pipeline = (
+            _tabela_pipeline_pdf(
+                df_pipeline_vendas
+            )
+        )
+
+        if tabela_pipeline is not None:
+            story.append(
+                tabela_pipeline
+            )
 
     story.append(PageBreak())
 
