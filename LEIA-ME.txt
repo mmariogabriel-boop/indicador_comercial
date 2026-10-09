@@ -124,3 +124,42 @@ O PDF agora inclui:
 Foi criada uma aba Executivos no dashboard.
 Os gráficos de Saúde e Odonto são exibidos verticalmente, um abaixo do outro.
 O mesmo padrão foi aplicado ao relatório PDF.
+
+
+ATUALIZAÇÃO - PRODUÇÃO X EVASÃO POR CORRETORA
+
+Foi criada a aba "Produção x Evasão".
+
+PRODUÇÃO
+- Descrição Cancelamento vazia;
+- Tipo Movimentação = VIDA NOVA;
+- Competência pela Data Inclusão Vida.
+
+EVASÃO
+- Descrição Cancelamento preenchida;
+- Tipo Movimentação = VIDA NOVA;
+- Competência pela Data Fim Beneficiário;
+- motivos considerados:
+  DESLIGAMENTO DA EMPRESA (RN279)
+  DESISTÊNCIA
+  BENEFÍCIO DEMITIDO/APOSENTADO (RN279)
+  A PEDIDO DO BENEFICIÁRIO (RN561)
+  SEM JUSTA CAUSA
+  ATEN ADM - CANCELAMENTO DE CONTRATO
+  INADIMPLENTE
+  ÓBITO
+  RECISÃO POR ACORDO
+  JUSTA CAUSA
+
+SALDO
+Saldo = Quantidade de Produção - Quantidade de Evasões
+
+A aba contém:
+- filtro próprio de Competência;
+- filtro próprio de Corretora;
+- KPIs de Produção, Evasão e Saldo;
+- gráfico Produção x Evasão por competência;
+- saldo por corretora;
+- motivos de evasão;
+- tabela detalhada;
+- download em Excel com saldo e motivos.

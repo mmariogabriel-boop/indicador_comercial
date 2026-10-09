@@ -85,6 +85,19 @@ DESCRICOES_CANCELAMENTO_VALIDAS = [
     "INADIMPLENTE",
 ]
 
+CANCELAMENTOS_EVASAO = [
+    "DESLIGAMENTO DA EMPRESA (RN279)",
+    "DESISTÊNCIA",
+    "BENEFÍCIO DEMITIDO/APOSENTADO (RN279)",
+    "A PEDIDO DO BENEFICIÁRIO (RN561)",
+    "SEM JUSTA CAUSA",
+    "ATEN ADM - CANCELAMENTO DE CONTRATO",
+    "INADIMPLENTE",
+    "ÓBITO",
+    "RECISÃO POR ACORDO",
+    "JUSTA CAUSA",
+]
+
 DATA_CORTE = pd.Timestamp("2025-12-01")
 
 
@@ -96,6 +109,7 @@ COLUNAS_BASE_TOTAL = [
     "Tipo Movimentação",
     "Data Início Beneficiário",
     "Data Inclusão Vida",
+    "Data Fim Beneficiário",
     "Descrição Status Atual Beneficiário",
     "Descrição Cancelamento",
     "Id Acomodação",
@@ -222,6 +236,255 @@ def padronizar_colunas_comerciais(
         df = df.rename(columns=renomear)
 
     return df
+
+
+# =========================================================
+# PRODUÇÃO X EVASÃO POR CORRETORA
+# =========================================================
+@st.cache_data(show_spinner=False, max_entries=2)
+def processar_producao_evasao(
+    nome_base: str,
+    bytes_base: bytes,
+):
+    """Reproduz a regra homologada de Produção x Evasão por corretora.
+
+    PRODUÇÃO
+    - Descrição Cancelamento vazia;
+    - Tipo Movimentação = VIDA NOVA;
+    - Competência pela Data Inclusão Vida.
+
+    EVASÃO
+    - Descrição Cancelamento preenchida;
+    - somente os motivos homologados em CANCELAMENTOS_EVASAO;
+    - Tipo Movimentação = VIDA NOVA;
+    - Competência pela Data Fim Beneficiário.
+    """
+
+    df = ler_excel_upload(
+        nome_base,
+        bytes_base,
+    ).copy()
+
+    df.columns = (
+        df.columns
+        .astype(str)
+        .str.strip()
+    )
+
+    df = padronizar_colunas_comerciais(
+        df
+    )
+
+    colunas_necessarias = [
+        "Descrição Cancelamento",
+        "Data Fim Beneficiário",
+        "Data Inclusão Vida",
+        "Tipo Movimentação",
+        "Descrição Corretora",
+    ]
+
+    validar_colunas(
+        df,
+        colunas_necessarias,
+        "Base Total - Produção x Evasão",
+    )
+
+    # -----------------------------------------------------
+    # EVASÃO
+    # -----------------------------------------------------
+    df_evasao = df[
+        df["Descrição Cancelamento"].notna()
+    ].copy()
+
+    df_evasao["Competencia"] = (
+        pd.to_datetime(
+            df_evasao["Data Fim Beneficiário"],
+            errors="coerce",
+        )
+        .dt.to_period("M")
+    )
+
+    df_evasao = df_evasao[
+        df_evasao["Descrição Cancelamento"].isin(
+            CANCELAMENTOS_EVASAO
+        )
+    ].copy()
+
+    df_evasao = df_evasao[
+        df_evasao["Tipo Movimentação"].eq(
+            "VIDA NOVA"
+        )
+    ].copy()
+
+    evasao_corretora = (
+        df_evasao
+        .groupby(
+            [
+                "Competencia",
+                "Descrição Corretora",
+            ],
+            dropna=False,
+        )
+        .size()
+        .reset_index(
+            name="Quantidade de Evasões"
+        )
+    )
+
+    evasao_corretora_motivos = (
+        df_evasao
+        .groupby(
+            [
+                "Competencia",
+                "Descrição Corretora",
+                "Descrição Cancelamento",
+            ],
+            dropna=False,
+        )
+        .size()
+        .reset_index(
+            name="Quantidade de Evasões"
+        )
+    )
+
+    # -----------------------------------------------------
+    # PRODUÇÃO
+    # -----------------------------------------------------
+    df_producao = df[
+        df["Descrição Cancelamento"].isna()
+    ].copy()
+
+    df_producao["Competencia"] = (
+        pd.to_datetime(
+            df_producao["Data Inclusão Vida"],
+            errors="coerce",
+        )
+        .dt.to_period("M")
+    )
+
+    df_producao = df_producao[
+        df_producao["Tipo Movimentação"].eq(
+            "VIDA NOVA"
+        )
+    ].copy()
+
+    producao_corretora = (
+        df_producao
+        .groupby(
+            [
+                "Competencia",
+                "Descrição Corretora",
+            ],
+            dropna=False,
+        )
+        .size()
+        .reset_index(
+            name="Quantidade de Producao"
+        )
+    )
+
+    # -----------------------------------------------------
+    # SALDO
+    # -----------------------------------------------------
+    saldo_corretoras = pd.merge(
+        producao_corretora,
+        evasao_corretora,
+        how="outer",
+        on=[
+            "Competencia",
+            "Descrição Corretora",
+        ],
+    )
+
+    for coluna in [
+        "Quantidade de Producao",
+        "Quantidade de Evasões",
+    ]:
+        saldo_corretoras[coluna] = (
+            saldo_corretoras[coluna]
+            .fillna(0)
+            .astype(int)
+        )
+
+    saldo_corretoras["Descrição Corretora"] = (
+        saldo_corretoras["Descrição Corretora"]
+        .astype("string")
+        .fillna("Não informado")
+        .str.strip()
+        .replace("", "Não informado")
+    )
+
+    saldo_corretoras["Saldo"] = (
+        saldo_corretoras["Quantidade de Producao"]
+        - saldo_corretoras["Quantidade de Evasões"]
+    )
+
+    saldo_corretoras = (
+        saldo_corretoras
+        .sort_values(
+            [
+                "Competencia",
+                "Descrição Corretora",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+
+    evasao_corretora_motivos["Descrição Corretora"] = (
+        evasao_corretora_motivos["Descrição Corretora"]
+        .astype("string")
+        .fillna("Não informado")
+        .str.strip()
+        .replace("", "Não informado")
+    )
+
+    return (
+        saldo_corretoras,
+        evasao_corretora_motivos,
+        df_producao,
+        df_evasao,
+    )
+
+
+def exportar_producao_evasao_excel(
+    saldo: pd.DataFrame,
+    motivos: pd.DataFrame,
+) -> bytes:
+    buffer = BytesIO()
+
+    saldo_export = saldo.copy()
+    motivos_export = motivos.copy()
+
+    if "Competencia" in saldo_export.columns:
+        saldo_export["Competencia"] = (
+            saldo_export["Competencia"]
+            .astype(str)
+        )
+
+    if "Competencia" in motivos_export.columns:
+        motivos_export["Competencia"] = (
+            motivos_export["Competencia"]
+            .astype(str)
+        )
+
+    with pd.ExcelWriter(
+        buffer,
+        engine="openpyxl",
+    ) as writer:
+        saldo_export.to_excel(
+            writer,
+            sheet_name="Saldo Corretoras",
+            index=False,
+        )
+
+        motivos_export.to_excel(
+            writer,
+            sheet_name="Motivos Evasão",
+            index=False,
+        )
+
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 # =========================================================
@@ -1979,6 +2242,265 @@ def grafico_pipeline_por_status(
 
 
 
+
+def grafico_producao_evasao_competencia(
+    saldo: pd.DataFrame,
+) -> go.Figure:
+    if saldo.empty:
+        return go.Figure()
+
+    dados = (
+        saldo
+        .groupby(
+            "Competencia",
+            as_index=False,
+        )[
+            [
+                "Quantidade de Producao",
+                "Quantidade de Evasões",
+            ]
+        ]
+        .sum()
+        .sort_values("Competencia")
+    )
+
+    dados["Competencia_Label"] = (
+        dados["Competencia"]
+        .astype(str)
+    )
+
+    fig = go.Figure()
+
+    fig.add_bar(
+        x=dados["Competencia_Label"],
+        y=dados["Quantidade de Producao"],
+        name="Produção",
+        marker_color="#86BC25",
+        text=dados["Quantidade de Producao"],
+        textposition="outside",
+    )
+
+    fig.add_bar(
+        x=dados["Competencia_Label"],
+        y=dados["Quantidade de Evasões"],
+        name="Evasão",
+        marker_color="#D64545",
+        text=dados["Quantidade de Evasões"],
+        textposition="outside",
+    )
+
+    fig.update_layout(
+        title="Produção x Evasão por competência",
+        barmode="group",
+        height=470,
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        legend=dict(
+            orientation="h",
+            y=1.12,
+            x=1,
+            xanchor="right",
+        ),
+        font=dict(
+            family="Arial",
+            color="#404640",
+        ),
+    )
+
+    fig.update_xaxes(
+        title="Competência",
+        showgrid=False,
+    )
+
+    fig.update_yaxes(
+        title="Quantidade",
+        gridcolor="#E8EDE4",
+        zeroline=False,
+    )
+
+    return fig
+
+
+def grafico_saldo_corretoras(
+    saldo: pd.DataFrame,
+    limite: int = 20,
+) -> go.Figure:
+    if saldo.empty:
+        return go.Figure()
+
+    ranking = (
+        saldo
+        .groupby(
+            "Descrição Corretora",
+            as_index=False,
+        )[
+            [
+                "Quantidade de Producao",
+                "Quantidade de Evasões",
+                "Saldo",
+            ]
+        ]
+        .sum()
+        .sort_values(
+            "Saldo",
+            ascending=False,
+        )
+    )
+
+    if len(ranking) > limite:
+        metade = limite // 2
+        ranking = pd.concat(
+            [
+                ranking.head(metade),
+                ranking.tail(limite - metade),
+            ],
+            ignore_index=True,
+        )
+
+    ranking = ranking.sort_values(
+        "Saldo",
+        ascending=True,
+    )
+
+    cores = [
+        "#86BC25"
+        if valor >= 0
+        else "#D64545"
+        for valor in ranking["Saldo"]
+    ]
+
+    fig = go.Figure(
+        go.Bar(
+            x=ranking["Saldo"],
+            y=ranking["Descrição Corretora"],
+            orientation="h",
+            text=ranking["Saldo"],
+            textposition="outside",
+            marker_color=cores,
+            customdata=ranking[
+                [
+                    "Quantidade de Producao",
+                    "Quantidade de Evasões",
+                ]
+            ],
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Produção: %{customdata[0]}<br>"
+                "Evasão: %{customdata[1]}<br>"
+                "Saldo: %{x}<extra></extra>"
+            ),
+        )
+    )
+
+    fig.update_layout(
+        title=(
+            "Saldo por corretora"
+            "<br><sup>Verde = saldo positivo | Vermelho = saldo negativo</sup>"
+        ),
+        height=max(
+            500,
+            len(ranking) * 32 + 160,
+        ),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        showlegend=False,
+        margin=dict(
+            l=20,
+            r=70,
+            t=85,
+            b=45,
+        ),
+        font=dict(
+            family="Arial",
+            color="#404640",
+        ),
+    )
+
+    fig.update_xaxes(
+        title="Saldo (Produção - Evasão)",
+        gridcolor="#E8EDE4",
+        zeroline=True,
+        zerolinecolor="#6B736D",
+    )
+
+    fig.update_yaxes(
+        title=None,
+    )
+
+    return fig
+
+
+def grafico_motivos_evasao(
+    motivos: pd.DataFrame,
+    limite: int = 15,
+) -> go.Figure:
+    if motivos.empty:
+        return go.Figure()
+
+    ranking = (
+        motivos
+        .groupby(
+            "Descrição Cancelamento",
+            as_index=False,
+        )["Quantidade de Evasões"]
+        .sum()
+        .sort_values(
+            "Quantidade de Evasões",
+            ascending=False,
+        )
+        .head(limite)
+        .sort_values(
+            "Quantidade de Evasões",
+            ascending=True,
+        )
+    )
+
+    fig = go.Figure(
+        go.Bar(
+            x=ranking["Quantidade de Evasões"],
+            y=ranking["Descrição Cancelamento"],
+            orientation="h",
+            text=ranking["Quantidade de Evasões"],
+            textposition="outside",
+            marker_color="#D64545",
+        )
+    )
+
+    fig.update_layout(
+        title="Principais motivos de evasão",
+        height=max(
+            430,
+            len(ranking) * 34 + 140,
+        ),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        showlegend=False,
+        margin=dict(
+            l=20,
+            r=65,
+            t=70,
+            b=45,
+        ),
+        font=dict(
+            family="Arial",
+            color="#404640",
+        ),
+    )
+
+    fig.update_xaxes(
+        title="Quantidade de evasões",
+        gridcolor="#E8EDE4",
+        zeroline=False,
+    )
+
+    fig.update_yaxes(
+        title=None,
+    )
+
+    return fig
+
+
+
 def tabela_formatada_competencia(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -2099,6 +2621,28 @@ try:
 except Exception as erro:
     st.error(
         f"Não foi possível processar as bases: {erro}"
+    )
+    st.stop()
+
+
+# =========================================================
+# PRODUÇÃO X EVASÃO POR CORRETORA
+# Processo independente das regras de venda válida do restante do dashboard.
+# =========================================================
+try:
+    (
+        saldo_corretoras,
+        evasao_corretora_motivos,
+        df_producao_corretoras,
+        df_evasao_corretoras,
+    ) = processar_producao_evasao(
+        arquivo_base.name,
+        arquivo_base.getvalue(),
+    )
+
+except Exception as erro:
+    st.error(
+        f"Não foi possível calcular Produção x Evasão por Corretora: {erro}"
     )
     st.stop()
 
@@ -2448,6 +2992,7 @@ with st.sidebar:
     aba_saude,
     aba_odonto,
     aba_rankings,
+    aba_producao_evasao,
     aba_conferencia,
 ) = st.tabs(
     [
@@ -2459,6 +3004,7 @@ with st.sidebar:
         "Saúde",
         "Odonto",
         "Rankings Comerciais",
+        "Produção x Evasão",
         "Conferência",
     ]
 )
@@ -3470,6 +4016,230 @@ with aba_rankings:
             f"{nao_classificados:,}".replace(",", ".")
             + " registro(s) possuem Id Acomodação diferente de "
             "AMB, ENF, QUA ou ODO e foram exibidos como 'Não classificado'."
+        )
+
+
+# ---------------------------------------------------------
+# PRODUÇÃO X EVASÃO POR CORRETORA
+# ---------------------------------------------------------
+with aba_producao_evasao:
+    st.subheader("Produção x Evasão por Corretora")
+
+    st.caption(
+        "Produção considera VIDA NOVA sem Descrição Cancelamento e usa a Data Inclusão Vida. "
+        "Evasão considera VIDA NOVA com os motivos de cancelamento homologados e usa a Data Fim Beneficiário."
+    )
+
+    competencias_pe_disponiveis = sorted(
+        [
+            competencia
+            for competencia in saldo_corretoras[
+                "Competencia"
+            ].dropna().unique().tolist()
+        ]
+    )
+
+    corretoras_pe_disponiveis = sorted(
+        saldo_corretoras[
+            "Descrição Corretora"
+        ]
+        .astype("string")
+        .fillna("Não informado")
+        .unique()
+        .tolist()
+    )
+
+    filtro1, filtro2 = st.columns(2)
+
+    with filtro1:
+        competencias_pe = st.multiselect(
+            "Competência — Produção x Evasão",
+            options=competencias_pe_disponiveis,
+            default=competencias_pe_disponiveis,
+            format_func=lambda periodo: str(periodo),
+            key="filtro_pe_competencia",
+        )
+
+    with filtro2:
+        corretoras_pe = st.multiselect(
+            "Corretora — Produção x Evasão",
+            options=corretoras_pe_disponiveis,
+            default=corretoras_pe_disponiveis,
+            key="filtro_pe_corretora",
+        )
+
+    saldo_pe = saldo_corretoras[
+        saldo_corretoras["Competencia"].isin(
+            competencias_pe
+        )
+        & saldo_corretoras[
+            "Descrição Corretora"
+        ].isin(
+            corretoras_pe
+        )
+    ].copy()
+
+    motivos_pe = evasao_corretora_motivos[
+        evasao_corretora_motivos[
+            "Competencia"
+        ].isin(
+            competencias_pe
+        )
+        & evasao_corretora_motivos[
+            "Descrição Corretora"
+        ].isin(
+            corretoras_pe
+        )
+    ].copy()
+
+    if saldo_pe.empty:
+        st.info(
+            "Não existem registros para o recorte selecionado."
+        )
+
+    else:
+        total_producao_pe = int(
+            saldo_pe[
+                "Quantidade de Producao"
+            ].sum()
+        )
+
+        total_evasao_pe = int(
+            saldo_pe[
+                "Quantidade de Evasões"
+            ].sum()
+        )
+
+        total_saldo_pe = int(
+            saldo_pe["Saldo"].sum()
+        )
+
+        corretoras_positivas = int(
+            saldo_pe.groupby(
+                "Descrição Corretora"
+            )["Saldo"]
+            .sum()
+            .gt(0)
+            .sum()
+        )
+
+        p1, p2, p3, p4 = st.columns(4)
+
+        p1.metric(
+            "Produção",
+            f"{total_producao_pe:,}".replace(
+                ",",
+                ".",
+            ),
+        )
+
+        p2.metric(
+            "Evasão",
+            f"{total_evasao_pe:,}".replace(
+                ",",
+                ".",
+            ),
+        )
+
+        p3.metric(
+            "Saldo",
+            f"{total_saldo_pe:+,}".replace(
+                ",",
+                ".",
+            ),
+        )
+
+        p4.metric(
+            "Corretoras com saldo positivo",
+            corretoras_positivas,
+        )
+
+        st.plotly_chart(
+            grafico_producao_evasao_competencia(
+                saldo_pe
+            ),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+            },
+        )
+
+        st.plotly_chart(
+            grafico_saldo_corretoras(
+                saldo_pe
+            ),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+            },
+        )
+
+        st.plotly_chart(
+            grafico_motivos_evasao(
+                motivos_pe
+            ),
+            use_container_width=True,
+            config={
+                "displaylogo": False,
+            },
+        )
+
+        tabela_saldo = saldo_pe.copy()
+        tabela_saldo["Competencia"] = (
+            tabela_saldo["Competencia"]
+            .astype(str)
+        )
+
+        tabela_saldo = tabela_saldo.sort_values(
+            [
+                "Competencia",
+                "Saldo",
+            ],
+            ascending=[
+                True,
+                False,
+            ],
+        )
+
+        st.markdown(
+            "#### Detalhamento por corretora"
+        )
+
+        st.dataframe(
+            tabela_saldo,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        with st.expander(
+            "Ver evasões por motivo"
+        ):
+            tabela_motivos = motivos_pe.copy()
+            tabela_motivos["Competencia"] = (
+                tabela_motivos["Competencia"]
+                .astype(str)
+            )
+
+            st.dataframe(
+                tabela_motivos,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        arquivo_pe = exportar_producao_evasao_excel(
+            saldo_pe,
+            motivos_pe,
+        )
+
+        st.download_button(
+            "Baixar Produção x Evasão em Excel",
+            data=arquivo_pe,
+            file_name="producao_evasao_corretoras.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True,
         )
 
 
