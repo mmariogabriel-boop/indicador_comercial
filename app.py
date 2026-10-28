@@ -83,19 +83,24 @@ DESCRICOES_CANCELAMENTO_VALIDAS = [
     "BENEFÍCIO DEMITIDO/APOSENTADO (RN279)",
     "DESLIGAMENTO DA EMPRESA (RN279)",
     "INADIMPLENTE",
+    "DESISTÊNCIA",
+    "ÓBITO",
+    "RECISÃO POR ACORDO",
+    "ATEN ADM - CANCELAMENTO DE CONTRATO"
 ]
 
 CANCELAMENTOS_EVASAO = [
-    "DESLIGAMENTO DA EMPRESA (RN279)",
-    "DESISTÊNCIA",
-    "BENEFÍCIO DEMITIDO/APOSENTADO (RN279)",
-    "A PEDIDO DO BENEFICIÁRIO (RN561)",
     "SEM JUSTA CAUSA",
-    "ATEN ADM - CANCELAMENTO DE CONTRATO",
+    "JUSTA CAUSA",
+    "A PEDIDO DO BENEFICIÁRIO (RN561)",
+    "BENEFÍCIO DEMITIDO/APOSENTADO (RN279)",
+    "DESLIGAMENTO DA EMPRESA (RN279)",
     "INADIMPLENTE",
+    "DESISTÊNCIA",
     "ÓBITO",
     "RECISÃO POR ACORDO",
-    "JUSTA CAUSA",
+    "ATEN ADM - CANCELAMENTO DE CONTRATO"
+    
 ]
 
 DATA_CORTE = pd.Timestamp("2025-12-01")
@@ -239,24 +244,19 @@ def padronizar_colunas_comerciais(
 
 
 # =========================================================
-# PRODUÇÃO X EVASÃO POR CORRETORA
+# EVASÃO POR CORRETORA
 # =========================================================
 @st.cache_data(show_spinner=False, max_entries=2)
-def processar_producao_evasao(
+def preparar_base_evasao(
     nome_base: str,
     bytes_base: bytes,
-):
-    """Reproduz a regra homologada de Produção x Evasão por corretora.
+) -> pd.DataFrame:
+    """Prepara a base de evasão conforme a regra homologada.
 
-    PRODUÇÃO
-    - Descrição Cancelamento vazia;
+    Regra:
+    - Data Fim Beneficiário válida;
     - Tipo Movimentação = VIDA NOVA;
-    - Competência pela Data Inclusão Vida.
-
-    EVASÃO
-    - Descrição Cancelamento preenchida;
-    - somente os motivos homologados em CANCELAMENTOS_EVASAO;
-    - Tipo Movimentação = VIDA NOVA;
+    - Descrição Cancelamento em CANCELAMENTOS_EVASAO;
     - Competência pela Data Fim Beneficiário.
     """
 
@@ -278,37 +278,34 @@ def processar_producao_evasao(
     colunas_necessarias = [
         "Descrição Cancelamento",
         "Data Fim Beneficiário",
-        "Data Inclusão Vida",
         "Tipo Movimentação",
         "Descrição Corretora",
+        "Descrição Material",
+        "Descrição Vendedor",
     ]
 
     validar_colunas(
         df,
         colunas_necessarias,
-        "Base Total - Produção x Evasão",
+        "Base Total - Evasão",
     )
 
-    # -----------------------------------------------------
-    # EVASÃO
-    # -----------------------------------------------------
+    df["Data Fim Beneficiário"] = pd.to_datetime(
+        df["Data Fim Beneficiário"],
+        dayfirst=True,
+        errors="coerce",
+    )
+
     df_evasao = df[
-        df["Descrição Cancelamento"].notna()
+        df["Data Fim Beneficiário"].notna()
     ].copy()
 
-    df_evasao["Competencia"] = (
-        pd.to_datetime(
-            df_evasao["Data Fim Beneficiário"],
-            errors="coerce",
-        )
-        .dt.to_period("M")
+    # Competência de EVASÃO:
+    # sempre vinculada à Data Fim Beneficiário.
+    df_evasao["Competencia_Evasao"] = (
+        df_evasao["Data Fim Beneficiário"]
+        .dt.strftime("%m/%Y")
     )
-
-    df_evasao = df_evasao[
-        df_evasao["Descrição Cancelamento"].isin(
-            CANCELAMENTOS_EVASAO
-        )
-    ].copy()
 
     df_evasao = df_evasao[
         df_evasao["Tipo Movimentação"].eq(
@@ -316,11 +313,155 @@ def processar_producao_evasao(
         )
     ].copy()
 
+    df_evasao = df_evasao[
+        df_evasao["Descrição Cancelamento"].isin(
+            CANCELAMENTOS_EVASAO
+        )
+    ].copy()
+
+    # Padronização igual aos filtros centrais.
+    for coluna in [
+        "Descrição Material",
+        "Descrição Corretora",
+        "Descrição Vendedor",
+    ]:
+        df_evasao[coluna] = (
+            df_evasao[coluna]
+            .astype("string")
+            .fillna("Não informado")
+            .str.strip()
+            .replace("", "Não informado")
+        )
+
+    return df_evasao.reset_index(
+        drop=True
+    )
+
+
+def montar_producao_evasao(
+    df_comercial_filtrado: pd.DataFrame,
+    df_evasao_base: pd.DataFrame,
+    competencias_selecionadas: list[str],
+    materiais_selecionados: list[str],
+    corretoras_selecionadas: list[str],
+    vendedores_selecionados: list[str],
+):
+    """Monta Produção x Evasão usando duas competências independentes.
+
+    PRODUÇÃO
+    ----------
+    A competência é SEMPRE vinculada à Data Inclusão Vida.
+
+        Competencia_Producao = Data Inclusão Vida
+
+    A produção utiliza o mesmo realizado comercial válido do dashboard
+    e continua reconciliando com Saúde + Odonto.
+
+    EVASÃO
+    ------
+    A competência é SEMPRE vinculada à Data Fim Beneficiário.
+
+        Competencia_Evasao = Data Fim Beneficiário
+
+    A evasão conta os registros de cancelamento já filtrados em
+    preparar_base_evasao().
+
+    IMPORTANTE
+    ----------
+    A mesma vida pode aparecer como Produção em um mês e como Evasão
+    em outro mês. A evasão posterior não altera a competência original
+    da produção.
+    """
+
+    # =====================================================
+    # PRODUÇÃO
+    # Competência = Data Inclusão Vida
+    # =====================================================
+    df_producao = df_comercial_filtrado.copy()
+
+    # Saúde + Odonto:
+    # Saúde exclui ODO/SEM e Odonto considera ODO.
+    # Para a produção consolidada excluímos somente SEM.
+    df_producao = df_producao[
+        ~df_producao["Id Acomodação"].eq(
+            "SEM"
+        )
+    ].copy()
+
+    df_producao["Data Inclusão Vida"] = pd.to_datetime(
+        df_producao["Data Inclusão Vida"],
+        dayfirst=True,
+        errors="coerce",
+    )
+
+    df_producao["Competencia_Producao"] = (
+        df_producao["Data Inclusão Vida"]
+        .dt.strftime("%m/%Y")
+    )
+
+    # Mantém o mesmo filtro central de competência,
+    # mas aplicado à competência correta da Produção.
+    df_producao = df_producao[
+        df_producao["Competencia_Producao"].isin(
+            competencias_selecionadas
+        )
+    ].copy()
+
+    df_producao["Descrição Corretora"] = (
+        df_producao["Descrição Corretora"]
+        .astype("string")
+        .fillna("Não informado")
+        .str.strip()
+        .replace("", "Não informado")
+    )
+
+    producao_corretora = (
+        df_producao
+        .groupby(
+            [
+                "Competencia_Producao",
+                "Descrição Corretora",
+            ],
+            dropna=False,
+        )
+        .agg(
+            {
+                "Descrição Beneficiário": "count",
+            }
+        )
+        .reset_index()
+        .rename(
+            columns={
+                "Competencia_Producao": "Competencia",
+                "Descrição Beneficiário": "Quantidade de Producao",
+            }
+        )
+    )
+
+    # =====================================================
+    # EVASÃO
+    # Competência = Data Fim Beneficiário
+    # =====================================================
+    df_evasao = df_evasao_base[
+        df_evasao_base["Competencia_Evasao"].isin(
+            competencias_selecionadas
+        )
+        & df_evasao_base["Descrição Material"].isin(
+            materiais_selecionados
+        )
+        & df_evasao_base["Descrição Corretora"].isin(
+            corretoras_selecionadas
+        )
+        & df_evasao_base["Descrição Vendedor"].isin(
+            vendedores_selecionados
+        )
+    ].copy()
+
     evasao_corretora = (
         df_evasao
         .groupby(
             [
-                "Competencia",
+                "Competencia_Evasao",
                 "Descrição Corretora",
             ],
             dropna=False,
@@ -329,13 +470,18 @@ def processar_producao_evasao(
         .reset_index(
             name="Quantidade de Evasões"
         )
+        .rename(
+            columns={
+                "Competencia_Evasao": "Competencia",
+            }
+        )
     )
 
     evasao_corretora_motivos = (
         df_evasao
         .groupby(
             [
-                "Competencia",
+                "Competencia_Evasao",
                 "Descrição Corretora",
                 "Descrição Cancelamento",
             ],
@@ -345,47 +491,18 @@ def processar_producao_evasao(
         .reset_index(
             name="Quantidade de Evasões"
         )
-    )
-
-    # -----------------------------------------------------
-    # PRODUÇÃO
-    # -----------------------------------------------------
-    df_producao = df[
-        df["Descrição Cancelamento"].isna()
-    ].copy()
-
-    df_producao["Competencia"] = (
-        pd.to_datetime(
-            df_producao["Data Inclusão Vida"],
-            errors="coerce",
-        )
-        .dt.to_period("M")
-    )
-
-    df_producao = df_producao[
-        df_producao["Tipo Movimentação"].eq(
-            "VIDA NOVA"
-        )
-    ].copy()
-
-    producao_corretora = (
-        df_producao
-        .groupby(
-            [
-                "Competencia",
-                "Descrição Corretora",
-            ],
-            dropna=False,
-        )
-        .size()
-        .reset_index(
-            name="Quantidade de Producao"
+        .rename(
+            columns={
+                "Competencia_Evasao": "Competencia",
+            }
         )
     )
 
-    # -----------------------------------------------------
+    # =====================================================
     # SALDO
-    # -----------------------------------------------------
+    # Só aqui as duas competências são colocadas lado a lado:
+    # Produção do mês - Evasão do mesmo mês.
+    # =====================================================
     saldo_corretoras = pd.merge(
         producao_corretora,
         evasao_corretora,
@@ -430,14 +547,6 @@ def processar_producao_evasao(
         .reset_index(drop=True)
     )
 
-    evasao_corretora_motivos["Descrição Corretora"] = (
-        evasao_corretora_motivos["Descrição Corretora"]
-        .astype("string")
-        .fillna("Não informado")
-        .str.strip()
-        .replace("", "Não informado")
-    )
-
     return (
         saldo_corretoras,
         evasao_corretora_motivos,
@@ -454,18 +563,6 @@ def exportar_producao_evasao_excel(
 
     saldo_export = saldo.copy()
     motivos_export = motivos.copy()
-
-    if "Competencia" in saldo_export.columns:
-        saldo_export["Competencia"] = (
-            saldo_export["Competencia"]
-            .astype(str)
-        )
-
-    if "Competencia" in motivos_export.columns:
-        motivos_export["Competencia"] = (
-            motivos_export["Competencia"]
-            .astype(str)
-        )
 
     with pd.ExcelWriter(
         buffer,
@@ -484,6 +581,7 @@ def exportar_producao_evasao_excel(
         )
 
     buffer.seek(0)
+
     return buffer.getvalue()
 
 
@@ -2577,6 +2675,13 @@ with st.sidebar:
         "A PEDIDO DO BENEFICIÁRIO (RN561), "
         "BENEFÍCIO DEMITIDO/APOSENTADO (RN279), "
         "DESLIGAMENTO DA EMPRESA (RN279), INADIMPLENTE ou vazio."
+        "ATEN ADM - CANCELAMENTO DE CONTRATO, "
+        "RECISÃO POR ACORDO, "
+        "ÓBITO, "
+        "INADIMPLENTE, "
+        "DESISTÊNCIA, "
+
+
     )
     st.caption("Registros válidos: Diferença ≤ 0")
     st.caption("Competências disponíveis: 01/2026 em diante")
@@ -2626,23 +2731,19 @@ except Exception as erro:
 
 
 # =========================================================
-# PRODUÇÃO X EVASÃO POR CORRETORA
-# Processo independente das regras de venda válida do restante do dashboard.
+# BASE DE EVASÃO
+# A produção será montada depois dos filtros centrais, usando o
+# mesmo realizado dos KPIs Saúde + Odonto.
 # =========================================================
 try:
-    (
-        saldo_corretoras,
-        evasao_corretora_motivos,
-        df_producao_corretoras,
-        df_evasao_corretoras,
-    ) = processar_producao_evasao(
+    df_evasao_base = preparar_base_evasao(
         arquivo_base.name,
         arquivo_base.getvalue(),
     )
 
 except Exception as erro:
     st.error(
-        f"Não foi possível calcular Produção x Evasão por Corretora: {erro}"
+        f"Não foi possível preparar a base de evasão: {erro}"
     )
     st.stop()
 
@@ -2736,7 +2837,7 @@ with st.sidebar:
 
     st.caption(
         "Os filtros afetam KPIs, Saúde, Odonto, executivos, "
-        "rankings comerciais e o realizado do comparativo de metas."
+        "rankings, metas e Produção x Evasão por Corretora."
     )
 
 # Padroniza os campos antes de aplicar os filtros.
@@ -2791,6 +2892,24 @@ if df_comercial.empty:
 
 df_vendedores_internos = criar_visao_vendedores_internos(
     df_comercial_base_internos
+)
+
+
+# =========================================================
+# PRODUÇÃO X EVASÃO - MESMOS FILTROS CENTRAIS
+# =========================================================
+(
+    saldo_corretoras,
+    evasao_corretora_motivos,
+    df_producao_corretoras,
+    df_evasao_corretoras,
+) = montar_producao_evasao(
+    df_comercial_filtrado=df_comercial,
+    df_evasao_base=df_evasao_base,
+    competencias_selecionadas=competencias_selecionadas,
+    materiais_selecionados=materiais_selecionados,
+    corretoras_selecionadas=corretoras_selecionadas,
+    vendedores_selecionados=vendedores_selecionados,
 )
 
 
@@ -4026,96 +4145,39 @@ with aba_producao_evasao:
     st.subheader("Produção x Evasão por Corretora")
 
     st.caption(
-        "Produção considera VIDA NOVA sem Descrição Cancelamento e usa a Data Inclusão Vida. "
-        "Evasão considera VIDA NOVA com os motivos de cancelamento homologados e usa a Data Fim Beneficiário."
+        "Esta visão utiliza os filtros centrais da barra lateral. "
+        "Produção usa a competência da Data Inclusão Vida. "
+        "Evasão usa a competência da Data Fim Beneficiário e conta os cancelamentos considerados. "
+        "Uma vida pode ser produção em um mês e evasão em outro."
     )
 
-    competencias_pe_disponiveis = sorted(
-        [
-            competencia
-            for competencia in saldo_corretoras[
-                "Competencia"
-            ].dropna().unique().tolist()
-        ]
-    )
-
-    corretoras_pe_disponiveis = sorted(
-        saldo_corretoras[
-            "Descrição Corretora"
-        ]
-        .astype("string")
-        .fillna("Não informado")
-        .unique()
-        .tolist()
-    )
-
-    filtro1, filtro2 = st.columns(2)
-
-    with filtro1:
-        competencias_pe = st.multiselect(
-            "Competência — Produção x Evasão",
-            options=competencias_pe_disponiveis,
-            default=competencias_pe_disponiveis,
-            format_func=lambda periodo: str(periodo),
-            key="filtro_pe_competencia",
-        )
-
-    with filtro2:
-        corretoras_pe = st.multiselect(
-            "Corretora — Produção x Evasão",
-            options=corretoras_pe_disponiveis,
-            default=corretoras_pe_disponiveis,
-            key="filtro_pe_corretora",
-        )
-
-    saldo_pe = saldo_corretoras[
-        saldo_corretoras["Competencia"].isin(
-            competencias_pe
-        )
-        & saldo_corretoras[
-            "Descrição Corretora"
-        ].isin(
-            corretoras_pe
-        )
-    ].copy()
-
-    motivos_pe = evasao_corretora_motivos[
-        evasao_corretora_motivos[
-            "Competencia"
-        ].isin(
-            competencias_pe
-        )
-        & evasao_corretora_motivos[
-            "Descrição Corretora"
-        ].isin(
-            corretoras_pe
-        )
-    ].copy()
-
-    if saldo_pe.empty:
+    if saldo_corretoras.empty:
         st.info(
             "Não existem registros para o recorte selecionado."
         )
 
     else:
         total_producao_pe = int(
-            saldo_pe[
+            saldo_corretoras[
                 "Quantidade de Producao"
             ].sum()
         )
 
         total_evasao_pe = int(
-            saldo_pe[
+            saldo_corretoras[
                 "Quantidade de Evasões"
             ].sum()
         )
 
         total_saldo_pe = int(
-            saldo_pe["Saldo"].sum()
+            saldo_corretoras[
+                "Saldo"
+            ].sum()
         )
 
         corretoras_positivas = int(
-            saldo_pe.groupby(
+            saldo_corretoras
+            .groupby(
                 "Descrição Corretora"
             )["Saldo"]
             .sum()
@@ -4154,9 +4216,22 @@ with aba_producao_evasao:
             corretoras_positivas,
         )
 
+        # A produção deve reconciliar com o KPI Saúde + Odonto.
+        if total_producao_pe != total_validos:
+            st.warning(
+                "A produção desta visão não reconciliou com Saúde + Odonto. "
+                f"Produção: {total_producao_pe:,} | Saúde + Odonto: {total_validos:,}"
+                .replace(",", ".")
+            )
+        else:
+            st.success(
+                "Produção reconciliada com o realizado do painel: "
+                f"{total_producao_pe:,}".replace(",", ".")
+            )
+
         st.plotly_chart(
             grafico_producao_evasao_competencia(
-                saldo_pe
+                saldo_corretoras
             ),
             use_container_width=True,
             config={
@@ -4166,7 +4241,7 @@ with aba_producao_evasao:
 
         st.plotly_chart(
             grafico_saldo_corretoras(
-                saldo_pe
+                saldo_corretoras
             ),
             use_container_width=True,
             config={
@@ -4176,7 +4251,7 @@ with aba_producao_evasao:
 
         st.plotly_chart(
             grafico_motivos_evasao(
-                motivos_pe
+                evasao_corretora_motivos
             ),
             use_container_width=True,
             config={
@@ -4184,21 +4259,19 @@ with aba_producao_evasao:
             },
         )
 
-        tabela_saldo = saldo_pe.copy()
-        tabela_saldo["Competencia"] = (
-            tabela_saldo["Competencia"]
-            .astype(str)
-        )
-
-        tabela_saldo = tabela_saldo.sort_values(
-            [
-                "Competencia",
-                "Saldo",
-            ],
-            ascending=[
-                True,
-                False,
-            ],
+        tabela_saldo = (
+            saldo_corretoras
+            .copy()
+            .sort_values(
+                [
+                    "Competencia",
+                    "Saldo",
+                ],
+                ascending=[
+                    True,
+                    False,
+                ],
+            )
         )
 
         st.markdown(
@@ -4214,21 +4287,17 @@ with aba_producao_evasao:
         with st.expander(
             "Ver evasões por motivo"
         ):
-            tabela_motivos = motivos_pe.copy()
-            tabela_motivos["Competencia"] = (
-                tabela_motivos["Competencia"]
-                .astype(str)
-            )
-
             st.dataframe(
-                tabela_motivos,
+                evasao_corretora_motivos,
                 use_container_width=True,
                 hide_index=True,
             )
 
-        arquivo_pe = exportar_producao_evasao_excel(
-            saldo_pe,
-            motivos_pe,
+        arquivo_pe = (
+            exportar_producao_evasao_excel(
+                saldo_corretoras,
+                evasao_corretora_motivos,
+            )
         )
 
         st.download_button(
@@ -4241,6 +4310,8 @@ with aba_producao_evasao:
             ),
             use_container_width=True,
         )
+
+
 
 
 # ---------------------------------------------------------
